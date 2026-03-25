@@ -47,7 +47,15 @@ For real `run` execution:
 1. Create a named target once from the control repo:
 
 ```sh
-nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /Users/semigrp/dev/canaria
+nightloop init-target \
+  --name canaria \
+  --repo UTAGEDA/canaria \
+  --workdir /Users/semigrp/dev/canaria \
+  --agent-command "codex exec --full-auto" \
+  --plan-command "codex exec --planner" \
+  --default-model gpt-5.4 \
+  --default-reasoning-effort medium \
+  --request-copilot-review
 ```
 
 2. Ensure `gh` is authenticated for the target repository.
@@ -77,6 +85,15 @@ Advanced or one-off usage can still bypass the target registry:
 ```sh
 nightloop --config /abs/path/to/nightloop.toml run --parent 221 --hours 4
 ```
+
+`init-target` can fill the common initial settings so you do not need to hand-edit the generated TOML for a normal setup. Supported flags are:
+
+- `--base-branch`
+- `--agent-command`
+- `--plan-command`
+- `--default-model`
+- `--default-reasoning-effort`
+- `--request-copilot-review`
 
 ## Control Repo Mode
 

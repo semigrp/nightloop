@@ -223,6 +223,11 @@ pub fn render_named_target_config(
     repo_name: &str,
     workdir: &Path,
     base_branch: &str,
+    agent_command: &str,
+    plan_command: &str,
+    default_model: &str,
+    default_reasoning_effort: &str,
+    request_copilot_review: bool,
 ) -> String {
     template
         .replacen(
@@ -241,10 +246,38 @@ pub fn render_named_target_config(
             1,
         )
         .replacen(
+            r#"request_copilot_review = false"#,
+            &format!("request_copilot_review = {request_copilot_review}"),
+            1,
+        )
+        .replacen(
+            r#"command = "codex exec""#,
+            &format!(r#"command = "{}""#, escape_toml_string(agent_command)),
+            1,
+        )
+        .replacen(
+            r#"plan_command = "codex exec""#,
+            &format!(r#"plan_command = "{}""#, escape_toml_string(plan_command)),
+            1,
+        )
+        .replacen(
             r#"working_directory = ".""#,
             &format!(
                 r#"working_directory = "{}""#,
                 escape_toml_string(&workdir.display().to_string())
+            ),
+            1,
+        )
+        .replacen(
+            r#"default_model = "gpt-5.4""#,
+            &format!(r#"default_model = "{}""#, escape_toml_string(default_model)),
+            1,
+        )
+        .replacen(
+            r#"default_reasoning_effort = "medium""#,
+            &format!(
+                r#"default_reasoning_effort = "{}""#,
+                escape_toml_string(default_reasoning_effort)
             ),
             1,
         )
@@ -419,11 +452,20 @@ template_weight = 0.35
             "canaria",
             std::path::Path::new("/tmp/canaria"),
             "develop",
+            "codex exec --full-auto",
+            "codex exec --planner",
+            "gpt-5.4-mini",
+            "high",
+            true,
         );
         assert!(rendered.contains(r#"owner = "UTAGEDA""#));
         assert!(rendered.contains(r#"repo = "canaria""#));
         assert!(rendered.contains(r#"base_branch = "develop""#));
+        assert!(rendered.contains(r#"request_copilot_review = true"#));
+        assert!(rendered.contains(r#"command = "codex exec --full-auto""#));
+        assert!(rendered.contains(r#"plan_command = "codex exec --planner""#));
         assert!(rendered.contains(r#"working_directory = "/tmp/canaria""#));
-        assert!(rendered.contains(r#"request_copilot_review = false"#));
+        assert!(rendered.contains(r#"default_model = "gpt-5.4-mini""#));
+        assert!(rendered.contains(r#"default_reasoning_effort = "high""#));
     }
 }

@@ -28,6 +28,11 @@ enum Command {
         repo: String,
         workdir: PathBuf,
         base_branch: String,
+        agent_command: String,
+        plan_command: String,
+        default_model: String,
+        default_reasoning_effort: String,
+        request_copilot_review: bool,
     },
     Run {
         parent: u64,
@@ -73,6 +78,11 @@ fn real_main() -> Result<()> {
             repo,
             workdir,
             base_branch,
+            agent_command,
+            plan_command,
+            default_model,
+            default_reasoning_effort,
+            request_copilot_review,
         } => {
             let control_root =
                 config::resolve_control_root(&cwd, cli.explicit_config_path.as_deref());
@@ -88,6 +98,11 @@ fn real_main() -> Result<()> {
                 repo_name,
                 &workdir,
                 &base_branch,
+                &agent_command,
+                &plan_command,
+                &default_model,
+                &default_reasoning_effort,
+                request_copilot_review,
             );
             let target_dir = control_root.join("targets");
             std::fs::create_dir_all(&target_dir)?;
@@ -100,6 +115,11 @@ fn real_main() -> Result<()> {
                 ("ok", "true".to_string()),
                 ("target", name),
                 ("config_path", target_path.display().to_string()),
+                ("agent_command", agent_command),
+                ("plan_command", plan_command),
+                ("default_model", default_model),
+                ("default_reasoning_effort", default_reasoning_effort),
+                ("request_copilot_review", request_copilot_review.to_string()),
             ]);
         }
         Command::Budget { hours } => {
@@ -408,6 +428,11 @@ fn parse_init_target(args: Vec<String>) -> Result<Command> {
     let mut repo = None;
     let mut workdir = None;
     let mut base_branch = "main".to_string();
+    let mut agent_command = "codex exec".to_string();
+    let mut plan_command = "codex exec".to_string();
+    let mut default_model = "gpt-5.4".to_string();
+    let mut default_reasoning_effort = "medium".to_string();
+    let mut request_copilot_review = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -434,6 +459,29 @@ fn parse_init_target(args: Vec<String>) -> Result<Command> {
                     .next()
                     .ok_or_else(|| anyhow!("--base-branch requires a value"))?;
             }
+            "--agent-command" => {
+                agent_command = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--agent-command requires a value"))?;
+            }
+            "--plan-command" => {
+                plan_command = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--plan-command requires a value"))?;
+            }
+            "--default-model" => {
+                default_model = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--default-model requires a value"))?;
+            }
+            "--default-reasoning-effort" => {
+                default_reasoning_effort = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--default-reasoning-effort requires a value"))?;
+            }
+            "--request-copilot-review" => {
+                request_copilot_review = true;
+            }
             other => bail!("unexpected argument for init-target: {other}"),
         }
     }
@@ -442,6 +490,11 @@ fn parse_init_target(args: Vec<String>) -> Result<Command> {
         repo: repo.ok_or_else(|| anyhow!("init-target requires --repo"))?,
         workdir: workdir.ok_or_else(|| anyhow!("init-target requires --workdir"))?,
         base_branch,
+        agent_command,
+        plan_command,
+        default_model,
+        default_reasoning_effort,
+        request_copilot_review,
     })
 }
 
@@ -507,9 +560,9 @@ Append a run record to local telemetry.\n"
 Validate required docs, templates, and prompt files.\n"
         }
         Some("init-target") => {
-            "Usage: nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--base-branch main]\n\
+            "Usage: nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--base-branch main] [--agent-command CMD] [--plan-command CMD] [--default-model MODEL] [--default-reasoning-effort LEVEL] [--request-copilot-review]\n\
 \n\
-Create targets/NAME.toml from the example template.\n"
+Create targets/NAME.toml from the example template and fill common initial settings.\n"
         }
         Some("run") => {
             "Usage: nightloop [--config PATH] [--target NAME] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
@@ -522,7 +575,7 @@ Execute or simulate a parent issue campaign.\n"
 Issue-first nightly runner for coding agents.\n\
 \n\
 Usage:\n\
-  nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH\n\
+  nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--agent-command CMD]\n\
   nightloop [--target NAME] docs-check\n\
   nightloop [--target NAME] lint-issue path/to/issue.md\n\
   nightloop [--target NAME] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\

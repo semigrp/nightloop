@@ -397,6 +397,15 @@ fn init_target_and_named_target_invocation_work() {
             "UTAGEDA/canaria",
             "--workdir",
             &target.display().to_string(),
+            "--agent-command",
+            "codex exec --full-auto",
+            "--plan-command",
+            "codex exec --planner",
+            "--default-model",
+            "gpt-5.4-mini",
+            "--default-reasoning-effort",
+            "high",
+            "--request-copilot-review",
         ],
     );
     assert_eq!(init_code, 0, "stderr={init_stderr}");
@@ -407,6 +416,13 @@ fn init_target_and_named_target_invocation_work() {
     assert!(named_contents.contains(r#"owner = "UTAGEDA""#));
     assert!(named_contents.contains(r#"repo = "canaria""#));
     assert!(named_contents.contains(&format!(r#"working_directory = "{}""#, target.display())));
+    assert!(named_contents.contains(r#"command = "codex exec --full-auto""#));
+    assert!(named_contents.contains(r#"plan_command = "codex exec --planner""#));
+    assert!(named_contents.contains(r#"default_model = "gpt-5.4-mini""#));
+    assert!(named_contents.contains(r#"default_reasoning_effort = "high""#));
+    assert!(named_contents.contains(r#"request_copilot_review = true"#));
+    assert!(init_stdout.contains(r#"agent_command="codex exec --full-auto""#));
+    assert!(init_stdout.contains("request_copilot_review=true"));
 
     let issue_path = root.join("issue.md");
     fs::write(
@@ -476,5 +492,6 @@ fn config_flag_overrides_named_target_and_help_mentions_target_workflow() {
     assert!(
         help_stdout.contains("nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH")
     );
+    assert!(help_stdout.contains("--agent-command CMD"));
     assert!(help_stdout.contains("--target NAME"));
 }
