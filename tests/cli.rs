@@ -268,7 +268,7 @@ fn lint_estimate_record_and_docs_commands_work_end_to_end() {
         &[
             "--config",
             &config.display().to_string(),
-            "lint-issue",
+            "lint",
             &issue_path.display().to_string(),
         ],
     );
@@ -280,7 +280,7 @@ fn lint_estimate_record_and_docs_commands_work_end_to_end() {
         &[
             "--config",
             &config.display().to_string(),
-            "estimate-issue",
+            "estimate",
             &issue_path.display().to_string(),
             "--basis",
             "hybrid",
@@ -332,10 +332,8 @@ fn lint_estimate_record_and_docs_commands_work_end_to_end() {
     assert!(record_stdout.contains("ok=true"));
     assert!(root.join(".nightloop/history.jsonl").exists());
 
-    let (docs_code, docs_stdout, docs_stderr) = run_cli(
-        &root,
-        &["--config", &config.display().to_string(), "docs-check"],
-    );
+    let (docs_code, docs_stdout, docs_stderr) =
+        run_cli(&root, &["--config", &config.display().to_string(), "check"]);
     assert_eq!(docs_code, 0, "stderr={docs_stderr}");
     assert!(docs_stdout.contains("ok=true"));
 }
@@ -363,7 +361,7 @@ fn lint_and_docs_use_target_repo_root_when_control_and_target_differ() {
         &[
             "--config",
             &config.display().to_string(),
-            "lint-issue",
+            "lint",
             &issue_path.display().to_string(),
         ],
     );
@@ -372,7 +370,7 @@ fn lint_and_docs_use_target_repo_root_when_control_and_target_differ() {
 
     let (docs_code, docs_stdout, docs_stderr) = run_cli(
         &control,
-        &["--config", &config.display().to_string(), "docs-check"],
+        &["--config", &config.display().to_string(), "check"],
     );
     assert_eq!(docs_code, 0, "stderr={docs_stderr}");
     assert!(docs_stdout.contains("ok=true"));
@@ -391,17 +389,10 @@ fn init_target_and_named_target_invocation_work() {
     let (init_code, init_stdout, init_stderr) = run_cli(
         &root,
         &[
-            "init-target",
-            "--name",
+            "init",
             "canaria",
-            "--repo",
             "UTAGEDA/canaria",
-            "--workdir",
             &target.display().to_string(),
-            "--agent-command",
-            "codex exec --full-auto",
-            "--plan-command",
-            "codex exec --planner",
             "--default-model",
             "gpt-5.4-mini",
             "--default-reasoning-effort",
@@ -418,11 +409,13 @@ fn init_target_and_named_target_invocation_work() {
     assert!(named_contents.contains(r#"repo = "canaria""#));
     assert!(named_contents.contains(&format!(r#"working_directory = "{}""#, target.display())));
     assert!(named_contents.contains(r#"command = "codex exec --full-auto""#));
-    assert!(named_contents.contains(r#"plan_command = "codex exec --planner""#));
+    assert!(named_contents.contains(r#"plan_command = "codex exec --full-auto""#));
+    assert!(named_contents.contains(r#"planner_prompt_prefix = "/plan""#));
     assert!(named_contents.contains(r#"default_model = "gpt-5.4-mini""#));
     assert!(named_contents.contains(r#"default_reasoning_effort = "high""#));
     assert!(named_contents.contains(r#"request_copilot_review = true"#));
     assert!(init_stdout.contains(r#"agent_command="codex exec --full-auto""#));
+    assert!(init_stdout.contains(r#"plan_command="codex exec --full-auto""#));
     assert!(init_stdout.contains("request_copilot_review=true"));
 
     let issue_path = root.join("issue.md");
@@ -432,15 +425,14 @@ fn init_target_and_named_target_invocation_work() {
     )
     .unwrap();
 
-    let (docs_code, docs_stdout, docs_stderr) =
-        run_cli(&root, &["docs-check", "--target", "canaria"]);
+    let (docs_code, docs_stdout, docs_stderr) = run_cli(&root, &["check", "--target", "canaria"]);
     assert_eq!(docs_code, 0, "stderr={docs_stderr}");
     assert!(docs_stdout.contains("ok=true"));
 
     let (lint_code, lint_stdout, lint_stderr) = run_cli(
         &root,
         &[
-            "lint-issue",
+            "lint",
             "--target",
             "canaria",
             &issue_path.display().to_string(),
@@ -481,7 +473,7 @@ fn config_flag_overrides_named_target_and_help_mentions_target_workflow() {
             &explicit.display().to_string(),
             "--target",
             "canaria",
-            "lint-issue",
+            "lint",
             &issue_path.display().to_string(),
         ],
     );
@@ -490,12 +482,13 @@ fn config_flag_overrides_named_target_and_help_mentions_target_workflow() {
 
     let (help_code, help_stdout, help_stderr) = run_cli(&root, &["--help"]);
     assert_eq!(help_code, 0, "stderr={help_stderr}");
+    assert!(help_stdout.contains("nightloop init NAME OWNER/REPO WORKDIR"));
+    assert!(help_stdout.contains("nightloop check [--target NAME]"));
+    assert!(help_stdout.contains("nightloop start PARENT_ISSUE [--target NAME] [--dry-run]"));
     assert!(
-        help_stdout.contains("nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH")
-    );
-    assert!(help_stdout.contains("nightloop [--target NAME] setup-labels"));
-    assert!(
-        help_stdout.contains("nightloop [--target NAME] review-loop --parent ISSUE [--dry-run]")
+        help_stdout.contains(
+            "Compatibility aliases:\ninit-target, docs-check, lint-issue, estimate-issue, review-loop, run"
+        )
     );
     assert!(help_stdout.contains("--agent-command CMD"));
     assert!(help_stdout.contains("--target NAME"));
@@ -512,7 +505,7 @@ fn setup_labels_help_and_target_resolution_are_exposed() {
 
     let (help_code, help_stdout, help_stderr) = run_cli(&root, &["setup-labels", "--help"]);
     assert_eq!(help_code, 0, "stderr={help_stderr}");
-    assert!(help_stdout.contains("Usage: nightloop [--config PATH] [--target NAME] setup-labels"));
+    assert!(help_stdout.contains("Usage: nightloop setup-labels [--target NAME]"));
 
     let (missing_code, _missing_stdout, missing_stderr) =
         run_cli(&root, &["setup-labels", "--target", "missing"]);

@@ -7,6 +7,10 @@ pub fn print_pairs(pairs: &[(&str, String)]) {
     println!("{rendered}");
 }
 
+pub fn print_progress(message: &str) {
+    eprintln!("{message}");
+}
+
 pub fn escape_value(value: &str) -> String {
     let sanitized = value
         .replace('\\', "\\\\")

@@ -12,7 +12,7 @@ copilot_reviewer = "github-copilot[bot]"
 command = "codex exec --full-auto"
 # Used only for advisory AI estimation / planning prompts.
 # It should return JSON for `estimate-issue --basis ai`.
-plan_command = "codex exec --planner"
+plan_command = "codex exec --full-auto"
 # Canonical target repo root. Relative paths resolve from the directory
 # containing `nightloop.toml`, so this can point at another checkout.
 working_directory = "/Users/semigrp/dev/canaria"
@@ -54,6 +54,12 @@ one_branch_per_child = true
 one_pr_per_child = true
 # Stored under the target repo root unless you provide an absolute path.
 run_root = ".nightloop/runs"
+
+[review_loop]
+review_poll_interval_seconds = 120
+review_wait_timeout_minutes = 90
+review_max_fix_rounds = 1
+planner_prompt_prefix = "/plan"
 
 [diff]
 min_lines = 50

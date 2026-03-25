@@ -30,17 +30,26 @@ An optional GitHub-specific post-PR hook may request review from `github-copilot
 
 Supported commands:
 
-- `nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /abs/path/to/repo`
+- `nightloop init canaria UTAGEDA/canaria /abs/path/to/repo`
+- `nightloop check`
+- `nightloop lint path/to/issue.md`
+- `nightloop estimate path/to/issue.md --basis template|local|hybrid|ai`
+- `nightloop start 221`
+- `nightloop nightly 221 --hours 4`
 - `nightloop setup-labels`
 - `nightloop budget --hours 2|3|4|5|6`
-- `nightloop lint-issue path/to/issue.md`
-- `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
 - `nightloop record-run path/to/run-record.json`
-- `nightloop docs-check`
-- `nightloop run --parent 221 --hours 4 [--dry-run]`
-- `nightloop review-loop --parent 221 [--dry-run]`
 
-All command output is compact `key=value`.
+Compatibility aliases remain supported:
+
+- `init-target`
+- `docs-check`
+- `lint-issue`
+- `estimate-issue`
+- `review-loop`
+- `run`
+
+Final command output is compact `key=value` on `stdout`. Real `start` and `nightly` runs emit live phase progress on `stderr`.
 
 Named target resolution order is:
 
@@ -48,15 +57,15 @@ Named target resolution order is:
 2. `--target NAME` -> `targets/NAME.toml`
 3. fallback `./nightloop.toml`
 
-`setup-labels` bootstraps the managed workflow labels from `[labels]` for the selected target repo and is safe to rerun.
+`setup-labels` bootstraps the managed workflow labels from `[labels]` for the selected target repo and is safe to rerun, but real `start` and `nightly` commands also auto-create missing managed labels.
 
-`run` reporting may include:
+`start` and `nightly` reporting may include:
 
 - `target_repo_root=...`
 - `run_root=...`
 - `target_repo_match=true|false|unknown`
 
-`review-loop` is the Codex-first single-child workflow:
+`start` is the Codex-first single-child workflow:
 
 - pick the first runnable child from the parent Issue
 - create a plan with `plan_command`
@@ -64,7 +73,9 @@ Named target resolution order is:
 - request Copilot review on the draft PR
 - wait for that review and run one fix pass
 
-`init-target` writes `targets/<name>.toml` from the shipped example template and fills:
+For Codex, `plan_command` remains a normal execution command. The planner prompt is prefixed with `/plan` automatically via `review_loop.planner_prompt_prefix`.
+
+`init` writes `targets/<name>.toml` from the shipped example template and fills:
 
 - `github.owner`
 - `github.repo`
@@ -121,7 +132,7 @@ One reference per non-empty line. Allowed forms:
 - absolute local paths
 - `http://` or `https://` URLs
 
-Local paths are validated by `lint-issue`. URLs are syntax-only.
+Local paths are validated by `lint`. URLs are syntax-only.
 
 Repo-relative paths are resolved against the target repo root, not the process `cwd`.
 
@@ -168,7 +179,7 @@ A child Issue is eligible only if:
 - metadata is valid
 - the target size band fits within the configured global diff limits
 
-The workflow labels are not assumed to preexist in a fresh repo. Real runs auto-create any missing managed labels. `setup-labels` remains available as an explicit bootstrap command.
+The workflow labels are not assumed to preexist in a fresh repo. Real `start` and `nightly` runs auto-create any missing managed labels. `setup-labels` remains available as an explicit bootstrap command.
 
 ## 6. Estimation Policy
 

@@ -18,17 +18,21 @@ The core stays provider-agnostic. `nightloop` shells out to local tools instead 
 
 This repository now implements the v0 CLI surface:
 
-- `nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /abs/path/to/repo`
-- `nightloop setup-labels`
+- `nightloop init canaria UTAGEDA/canaria /abs/path/to/repo`
+- `nightloop check --target canaria`
+- `nightloop lint path/to/issue.md --target canaria`
+- `nightloop estimate path/to/issue.md --target canaria --basis template|local|hybrid|ai`
+- `nightloop start 221 --target canaria [--dry-run]`
+- `nightloop nightly 221 --target canaria --hours 2|3|4|5|6 [--dry-run]`
+- `nightloop setup-labels --target canaria`
 - `nightloop budget --hours 2|3|4|5|6`
-- `nightloop lint-issue path/to/issue.md`
-- `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
 - `nightloop record-run path/to/run-record.json`
-- `nightloop docs-check`
-- `nightloop run --parent 221 --hours 4 [--dry-run]`
-- `nightloop review-loop --parent 221 [--dry-run]`
 
-Output is intentionally compact and machine-readable. Each line is a `key=value` record.
+Legacy aliases remain supported:
+
+- `init-target`, `docs-check`, `lint-issue`, `estimate-issue`, `review-loop`, `run`
+
+Output is intentionally compact and machine-readable on `stdout`. Real `start` and `nightly` runs also emit live human progress lines on `stderr`.
 
 ## Required Local Tools
 
@@ -37,7 +41,7 @@ Output is intentionally compact and machine-readable. Each line is a `key=value`
 - `gh`
 - a configured agent command in `nightloop.toml`
 
-For real `run` execution:
+For real `start` or `nightly` execution:
 
 - `gh auth status` must succeed
 - the git worktree must be clean before the run starts
@@ -49,52 +53,47 @@ For real `run` execution:
 1. Create a named target once from the control repo:
 
 ```sh
-nightloop init-target \
-  --name canaria \
-  --repo UTAGEDA/canaria \
-  --workdir /Users/semigrp/dev/canaria \
+nightloop init \
+  canaria \
+  UTAGEDA/canaria \
+  /Users/semigrp/dev/canaria \
   --agent-command "codex exec --full-auto" \
-  --plan-command "codex exec --planner" \
+  --plan-command "codex exec --full-auto" \
   --default-model gpt-5.4 \
   --default-reasoning-effort medium \
   --request-copilot-review
 ```
 
 2. Ensure `gh` is authenticated for the target repository.
-3. Bootstrap workflow labels once for the target repository:
+3. Author parent and child Issues using the templates in [`.github/ISSUE_TEMPLATE/`](/Users/semigrp/dev/nightloop/.github/ISSUE_TEMPLATE).
+4. Check issue quality locally:
 
 ```sh
-nightloop setup-labels --target canaria
+nightloop check --target canaria
+nightloop lint --target canaria path/to/child-issue.md
+nightloop estimate --target canaria path/to/child-issue.md --basis hybrid
 ```
 
-4. Author parent and child Issues using the templates in [`.github/ISSUE_TEMPLATE/`](/Users/semigrp/dev/nightloop/.github/ISSUE_TEMPLATE).
-5. Check issue quality locally:
+5. Simulate the default Codex-first single-child workflow:
 
 ```sh
-nightloop docs-check --target canaria
-nightloop lint-issue --target canaria path/to/child-issue.md
-nightloop estimate-issue --target canaria path/to/child-issue.md --basis hybrid
+nightloop start 221 --target canaria --dry-run
 ```
 
-6. Simulate a campaign:
+6. Execute it for real:
 
 ```sh
-nightloop run --target canaria --parent 221 --hours 4 --dry-run
+nightloop start 221 --target canaria
 ```
 
-7. Execute the campaign for real:
+Advanced or one-off usage can still bypass the target registry or use the multi-child nightly scheduler:
 
 ```sh
-nightloop run --target canaria --parent 221 --hours 4
+nightloop nightly 221 --target canaria --hours 4 --dry-run
+nightloop --config /abs/path/to/nightloop.toml nightly 221 --hours 4
 ```
 
-Advanced or one-off usage can still bypass the target registry:
-
-```sh
-nightloop --config /abs/path/to/nightloop.toml run --parent 221 --hours 4
-```
-
-`init-target` can fill the common initial settings so you do not need to hand-edit the generated TOML for a normal setup. Supported flags are:
+`init` can fill the common initial settings so you do not need to hand-edit the generated TOML for a normal setup. Supported flags are:
 
 - `--base-branch`
 - `--agent-command`
@@ -128,8 +127,8 @@ repo = "other-repo"
 base_branch = "main"
 
 [agent]
-command = "codex exec"
-plan_command = "codex exec"
+command = "codex exec --full-auto"
+plan_command = "codex exec --full-auto"
 working_directory = "/absolute/path/to/other-repo"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
@@ -138,16 +137,16 @@ default_reasoning_effort = "medium"
 Normal invocation from the control repo:
 
 ```sh
-nightloop setup-labels --target canaria
-nightloop docs-check --target canaria
-nightloop run --target canaria --parent 221 --hours 4 --dry-run
+nightloop check --target canaria
+nightloop start 221 --target canaria --dry-run
+nightloop nightly 221 --target canaria --hours 4 --dry-run
 ```
 
 ## Issue Contracts
 
 ### Parent Issues
 
-`nightloop run` parses the parent `## Ordered child Issues` section and preserves the listed order.
+`nightloop nightly` and `nightloop start` parse the parent `## Ordered child Issues` section and preserve the listed order.
 
 Supported checklist lines:
 
@@ -159,7 +158,7 @@ The checkbox state is tracking-only. GitHub Issue state and labels are the execu
 
 ### Child Issues
 
-`lint-issue` and `run` validate child Issues against the following sections:
+`lint` and both execution workflows validate child Issues against the following sections:
 
 - `## Background`
 - `## Goal`
@@ -190,7 +189,7 @@ Allowed forms:
 - absolute local paths
 - `http://` or `https://` URLs
 
-`lint-issue` validates local paths exist. URL validation is syntax-only.
+`lint` validates local paths exist. URL validation is syntax-only.
 
 Repo-relative paths are resolved against `agent.working_directory`, not the current shell directory.
 
@@ -229,7 +228,7 @@ Hours are selected explicitly between 2 and 6.
 
 - `fallback_slots = floor((hours * 60 - fixed_overhead_minutes) / fallback_cycle_minutes)`
 
-`run` uses issue-specific estimated minutes instead:
+`nightly` uses issue-specific estimated minutes instead:
 
 - reserve fixed overhead
 - preserve parent order
@@ -246,11 +245,11 @@ A child Issue is eligible only if all of the following are true:
 - child metadata parses and lints successfully
 - the target size band fits within the configured global diff limits
 
-`nightloop run` auto-creates any missing managed workflow labels before a real campaign starts. `setup-labels` remains available as an explicit bootstrap command.
+`nightloop nightly` and `nightloop start` auto-create any missing managed workflow labels before a real run starts. `setup-labels` remains available as an explicit bootstrap command.
 
 ## Review Loop
 
-`nightloop review-loop` is the Codex-first single-child path.
+`nightloop start` is the Codex-first single-child path.
 
 Behavior:
 
@@ -264,8 +263,8 @@ Behavior:
 Example:
 
 ```sh
-nightloop review-loop --target canaria --parent 221 --dry-run
-nightloop review-loop --target canaria --parent 221
+nightloop start 221 --target canaria --dry-run
+nightloop start 221 --target canaria
 ```
 
 ## Estimation Modes
@@ -277,7 +276,7 @@ The CLI supports four estimation modes:
 - `hybrid`
 - `ai`
 
-Child Issue metadata may still declare `manual` as the recorded estimation basis for backward compatibility, but `estimate-issue --basis` only accepts the four runtime modes above.
+Child Issue metadata may still declare `manual` as the recorded estimation basis for backward compatibility, but `estimate --basis` only accepts the four runtime modes above.
 
 `hybrid` is the recommended default:
 
@@ -306,13 +305,16 @@ Review loop config:
 review_poll_interval_seconds = 120
 review_wait_timeout_minutes = 90
 review_max_fix_rounds = 1
+planner_prompt_prefix = "/plan"
 ```
+
+For Codex, keep `plan_command` as a normal executable such as `codex exec --full-auto`. `nightloop` injects `/plan` into the planner prompt automatically. Do not set `plan_command = "codex exec /plan"`.
 
 ## Run Behavior
 
 ### Dry Run
 
-`nightloop run --dry-run`:
+`nightloop nightly --dry-run`:
 
 - fetches the parent Issue
 - parses child Issue numbers
@@ -334,7 +336,7 @@ Dry-run also reports repairs that would be applied during a real run:
 
 ### Real Run
 
-`nightloop run`:
+`nightloop nightly`:
 
 1. requires valid `gh` auth and a clean worktree
 2. fetches and prepares the campaign exactly as dry-run does
@@ -389,7 +391,7 @@ When enabled in `nightloop.toml`:
 - `github.request_copilot_review = true`
 - `github.copilot_reviewer = "github-copilot[bot]"`
 
-`nightloop run` requests review immediately after each successful draft PR is created.
+`nightloop nightly` requests review immediately after each successful draft PR is created. `nightloop start` does the same for its single-child workflow.
 
 Behavior:
 

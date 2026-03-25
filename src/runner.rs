@@ -24,10 +24,14 @@ use crate::{
 pub struct RunReport {
     pub ok: bool,
     pub lines: Vec<Vec<(String, String)>>,
+    pub progress_lines: Vec<String>,
 }
 
 impl RunReport {
     pub fn print(&self) {
+        for line in &self.progress_lines {
+            reporting::print_progress(line);
+        }
         for line in &self.lines {
             let pairs = line
                 .iter()
@@ -302,6 +306,7 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         let prompt = build_agent_prompt(&prepared.parent, child, estimate, config);
         let prompt_path = child_run_dir.join("agent-prompt.md");
         item.branch = Some(branch_name.clone());
+        emit_progress(progress_implementing_branch(&branch_name));
 
         let mut labels_changed = false;
         if let Err(failure) = setup_issue_execution(
@@ -461,6 +466,7 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         item.pr_url = Some(pr_url.clone());
 
         if config.github.request_copilot_review {
+            emit_progress(progress_requesting_copilot_review());
             match github.request_pr_review(&pr_url, &config.github.copilot_reviewer) {
                 Ok(()) => item.copilot_review = Some("requested".to_string()),
                 Err(_) => {
@@ -668,6 +674,8 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
     let base_sha = git_ops::rev_parse(&workdir, &config.github.base_branch)?;
 
     let plan_prompt = build_plan_prompt(&prepared.parent, &child, &estimate, config);
+    let planner_prompt = apply_planner_prompt_prefix(config, &plan_prompt);
+    emit_progress(progress_planning_child(child.number));
     let plan_result = agent_exec::run_shell_command(
         &config.agent.plan_command,
         &workdir,
@@ -675,14 +683,18 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
             "NIGHTLOOP_PROMPT_FILE".to_string(),
             child_run_dir.join("plan-prompt.md").display().to_string(),
         )],
-        Some(&plan_prompt),
+        Some(&planner_prompt),
     )?;
-    fs::write(child_run_dir.join("plan-prompt.md"), &plan_prompt)?;
+    fs::write(child_run_dir.join("plan-prompt.md"), &planner_prompt)?;
     fs::write(child_run_dir.join("plan.stdout"), &plan_result.stdout)?;
     fs::write(child_run_dir.join("plan.stderr"), &plan_result.stderr)?;
     if !plan_result.success() {
         item.status = "skipped".to_string();
         item.reasons = vec!["plan_command_failed".to_string()];
+        item.detail = Some("planner_command_failed".to_string());
+        if !plan_result.stderr.trim().is_empty() {
+            item.git_stderr = Some(plan_result.stderr.clone());
+        }
         return Ok(build_report_with_workflow(
             &prepared,
             false,
@@ -730,6 +742,7 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
         .clone()
         .ok_or_else(|| anyhow!("review loop expected pr url"))?;
     if item.copilot_review.is_none() {
+        emit_progress(progress_requesting_copilot_review());
         match github.request_pr_review(&pr_url, &config.github.copilot_reviewer) {
             Ok(()) => item.copilot_review = Some("requested".to_string()),
             Err(_) => {
@@ -749,6 +762,7 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
     let pr_number = github.pr_number_from_url(&pr_url)?;
     state.copilot_review_status = Some("requested".to_string());
 
+    emit_progress(progress_waiting_for_copilot_review());
     let bundle = match github.poll_copilot_review(
         pr_number,
         config.review_loop.review_poll_interval_seconds,
@@ -786,6 +800,7 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
         &pr_base,
         &bundle,
     );
+    emit_progress(progress_applying_review_feedback());
     let fix_result = agent_exec::run_shell_command(
         &config.agent.command,
         &workdir,
@@ -1300,6 +1315,120 @@ fn build_parent_summary(
     summary
 }
 
+fn expected_branch_name(prepared: &PreparedCampaign, issue_number: u64) -> String {
+    format!("nightloop/{}-{}", prepared.parent.number, issue_number)
+}
+
+fn progress_planning_child(issue_number: u64) -> String {
+    format!("planning child #{issue_number}")
+}
+
+fn progress_implementing_branch(branch: &str) -> String {
+    format!("implementing branch {branch}")
+}
+
+fn progress_requesting_copilot_review() -> String {
+    "requesting copilot review".to_string()
+}
+
+fn progress_waiting_for_copilot_review() -> String {
+    "waiting for copilot review".to_string()
+}
+
+fn progress_applying_review_feedback() -> String {
+    "applying review feedback".to_string()
+}
+
+fn emit_progress(message: String) {
+    reporting::print_progress(&message);
+}
+
+fn build_nightly_progress_lines(prepared: &PreparedCampaign, dry_run: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for item in &prepared.issues {
+        let is_active =
+            item.status == "selected" || item.status == "completed" || item.status == "blocked";
+        if !is_active {
+            continue;
+        }
+        let branch = item
+            .branch
+            .clone()
+            .unwrap_or_else(|| expected_branch_name(prepared, item.snapshot.number));
+        if dry_run {
+            lines.push(format!("would {}", progress_implementing_branch(&branch)));
+        }
+    }
+    lines
+}
+
+fn build_review_loop_progress_lines(
+    prepared: &PreparedCampaign,
+    dry_run: bool,
+    workflow: &ReviewLoopState,
+) -> Vec<String> {
+    let Some(issue_number) = workflow.selected_child_issue else {
+        return Vec::new();
+    };
+    let branch = prepared
+        .issues
+        .iter()
+        .find(|item| item.snapshot.number == issue_number)
+        .and_then(|item| item.branch.clone())
+        .unwrap_or_else(|| expected_branch_name(prepared, issue_number));
+
+    if dry_run {
+        return vec![
+            format!("would {}", progress_planning_child(issue_number)),
+            format!("would {}", progress_implementing_branch(&branch)),
+            format!("would {}", progress_requesting_copilot_review()),
+            format!("would {}", progress_waiting_for_copilot_review()),
+            format!("would {}", progress_applying_review_feedback()),
+        ];
+    }
+
+    let mut lines = vec![progress_planning_child(issue_number)];
+    let item = prepared
+        .issues
+        .iter()
+        .find(|item| item.snapshot.number == issue_number);
+    let planner_failed = item
+        .map(|item| {
+            item.reasons
+                .iter()
+                .any(|reason| reason == "plan_command_failed")
+        })
+        .unwrap_or(false);
+    if !planner_failed {
+        lines.push(progress_implementing_branch(&branch));
+    }
+    if matches!(
+        workflow.copilot_review_status.as_deref(),
+        Some("requested" | "received" | "timeout" | "failed")
+    ) || item.and_then(|item| item.pr_url.as_ref()).is_some()
+    {
+        lines.push(progress_requesting_copilot_review());
+    }
+    if matches!(
+        workflow.copilot_review_status.as_deref(),
+        Some("received" | "timeout")
+    ) {
+        lines.push(progress_waiting_for_copilot_review());
+    }
+    if workflow.review_fix_rounds > 0
+        || item
+            .map(|item| {
+                item.reasons
+                    .iter()
+                    .any(|reason| reason == "review_fix_command_failed")
+            })
+            .unwrap_or(false)
+    {
+        lines.push(progress_applying_review_feedback());
+    }
+    lines
+}
+
 fn build_report(
     prepared: &PreparedCampaign,
     dry_run: bool,
@@ -1446,7 +1575,15 @@ fn build_report(
         lines.push(line);
     }
 
-    RunReport { ok, lines }
+    RunReport {
+        ok,
+        lines,
+        progress_lines: if dry_run {
+            build_nightly_progress_lines(prepared, dry_run)
+        } else {
+            Vec::new()
+        },
+    }
 }
 
 fn build_report_with_workflow(
@@ -1485,6 +1622,11 @@ fn build_report_with_workflow(
             "review_comments_ignored".to_string(),
             workflow.review_comments_ignored.to_string(),
         ));
+        report.progress_lines = if dry_run {
+            build_review_loop_progress_lines(prepared, dry_run, workflow)
+        } else {
+            Vec::new()
+        };
     }
     report
 }
@@ -1557,6 +1699,15 @@ fn build_plan_prompt(
         config.working_directory().display(),
         config.github.base_branch
     )
+}
+
+fn apply_planner_prompt_prefix(config: &Config, prompt: &str) -> String {
+    let prefix = config.review_loop.planner_prompt_prefix.trim();
+    if prefix.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prefix}\n\n{prompt}")
+    }
 }
 
 fn build_review_loop_implementation_prompt(
@@ -1992,6 +2143,7 @@ fn execute_single_child_flow(
     let workdir = config.working_directory();
     let prompt_path = child_run_dir.join("agent-prompt.md");
     item.branch = Some(branch_name.to_string());
+    emit_progress(progress_implementing_branch(branch_name));
 
     let mut labels_changed = false;
     setup_issue_execution(
@@ -2129,6 +2281,7 @@ fn execute_single_child_flow(
     )?;
     item.pr_url = Some(pr_url.clone());
     if config.github.request_copilot_review {
+        emit_progress(progress_requesting_copilot_review());
         match github.request_pr_review(&pr_url, &config.github.copilot_reviewer) {
             Ok(()) => item.copilot_review = Some("requested".to_string()),
             Err(_) => {
@@ -2249,8 +2402,11 @@ mod tests {
     };
 
     use super::{
-        build_copilot_review_comment_line, build_report, preflight_target_repo, repair_action,
-        PreparedCampaign, PreparedIssue, RepairKind,
+        apply_planner_prompt_prefix, build_copilot_review_comment_line, build_report,
+        build_report_with_workflow, preflight_target_repo, progress_applying_review_feedback,
+        progress_implementing_branch, progress_planning_child, progress_requesting_copilot_review,
+        progress_waiting_for_copilot_review, repair_action, PreparedCampaign, PreparedIssue,
+        RepairKind, ReviewLoopState,
     };
 
     #[test]
@@ -2262,6 +2418,17 @@ mod tests {
         assert!(build_copilot_review_comment_line(Some("failed"))
             .contains("copilot_review_request_failed"));
         assert!(build_copilot_review_comment_line(Some("skipped")).is_empty());
+    }
+
+    #[test]
+    fn planner_prompt_prefix_is_applied_only_to_plan_prompt() {
+        let root = env::temp_dir().join(format!("nightloop-plan-prefix-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let config = config_for_target(&root, &root, "semigrp/nightloop");
+        let prompt = apply_planner_prompt_prefix(&config, "body");
+        assert!(prompt.starts_with("/plan\n\n"));
+        assert!(prompt.ends_with("body"));
     }
 
     fn config_for_target(
@@ -2506,5 +2673,160 @@ template_weight = 0.35
         assert!(report.lines.iter().any(|line| line
             .iter()
             .any(|(key, value)| key == "repair" && value == "would_delete_stale_branch")));
+        assert!(report.progress_lines.is_empty());
+    }
+
+    #[test]
+    fn nightly_report_emits_branch_progress_for_selected_issue() {
+        let campaign = PreparedCampaign {
+            parent: ParentIssue {
+                number: 221,
+                title: "Parent".to_string(),
+                body: String::new(),
+                state: IssueState::Open,
+                labels: Vec::new(),
+                url: None,
+                sections: Default::default(),
+                children: Vec::new(),
+            },
+            issues: vec![PreparedIssue {
+                snapshot: IssueSnapshot {
+                    number: 222,
+                    title: "Child".to_string(),
+                    body: String::new(),
+                    state: IssueState::Open,
+                    labels: vec!["agent:ready".to_string()],
+                    url: None,
+                },
+                child: None,
+                estimate: None,
+                reasons: Vec::new(),
+                lint_findings: Vec::new(),
+                status: "selected".to_string(),
+                actual_minutes: None,
+                branch: None,
+                pr_url: None,
+                copilot_review: None,
+                detail: None,
+                git_stderr: None,
+                gh_stderr: None,
+                recovery: None,
+                repairs: Vec::new(),
+            }],
+            issue_snapshots: HashMap::new(),
+            dependency_done_cache: HashMap::new(),
+            estimated_total_minutes: 80,
+            remaining_minutes: 20,
+            hours: 2,
+            target_repo_match: "true".to_string(),
+            target_repo_root: "/tmp/target".to_string(),
+            run_root: "/tmp/target/.nightloop/runs".to_string(),
+            detail: None,
+            git_stderr: None,
+            gh_stderr: None,
+            recovery: None,
+            repair_lines: Vec::new(),
+            labels_repaired: 0,
+            issues_repaired: 0,
+            branches_repaired: 0,
+        };
+        let report = build_report(&campaign, true, true, 0);
+        assert_eq!(
+            report.progress_lines,
+            vec![format!(
+                "would {}",
+                progress_implementing_branch("nightloop/221-222")
+            )]
+        );
+        let real_report = build_report(&campaign, false, true, 0);
+        assert!(real_report.progress_lines.is_empty());
+    }
+
+    #[test]
+    fn real_review_loop_report_no_longer_carries_progress_lines() {
+        let campaign = PreparedCampaign {
+            parent: ParentIssue {
+                number: 221,
+                title: "Parent".to_string(),
+                body: String::new(),
+                state: IssueState::Open,
+                labels: Vec::new(),
+                url: None,
+                sections: Default::default(),
+                children: Vec::new(),
+            },
+            issues: vec![PreparedIssue {
+                snapshot: IssueSnapshot {
+                    number: 222,
+                    title: "Child".to_string(),
+                    body: String::new(),
+                    state: IssueState::Open,
+                    labels: vec!["agent:ready".to_string()],
+                    url: None,
+                },
+                child: None,
+                estimate: None,
+                reasons: Vec::new(),
+                lint_findings: Vec::new(),
+                status: "completed".to_string(),
+                actual_minutes: Some(5),
+                branch: Some("nightloop/221-222".to_string()),
+                pr_url: Some("https://example.com/pr/1".to_string()),
+                copilot_review: Some("requested".to_string()),
+                detail: None,
+                git_stderr: None,
+                gh_stderr: None,
+                recovery: None,
+                repairs: Vec::new(),
+            }],
+            issue_snapshots: HashMap::new(),
+            dependency_done_cache: HashMap::new(),
+            estimated_total_minutes: 80,
+            remaining_minutes: 20,
+            hours: 2,
+            target_repo_match: "true".to_string(),
+            target_repo_root: "/tmp/target".to_string(),
+            run_root: "/tmp/target/.nightloop/runs".to_string(),
+            detail: None,
+            git_stderr: None,
+            gh_stderr: None,
+            recovery: None,
+            repair_lines: Vec::new(),
+            labels_repaired: 0,
+            issues_repaired: 0,
+            branches_repaired: 0,
+        };
+        let workflow = ReviewLoopState {
+            workflow: "review_loop".to_string(),
+            selected_child_issue: Some(222),
+            plan_generated: true,
+            copilot_review_status: Some("received".to_string()),
+            review_fix_rounds: 1,
+            review_comments_total: 2,
+            review_comments_applied: 1,
+            review_comments_ignored: 1,
+        };
+        let report = build_report_with_workflow(&campaign, false, true, 5, Some(&workflow));
+        assert_eq!(report.progress_lines, Vec::<String>::new());
+    }
+
+    #[test]
+    fn progress_helpers_define_review_loop_live_phase_order() {
+        assert_eq!(
+            vec![
+                progress_planning_child(222),
+                progress_implementing_branch("nightloop/221-222"),
+                progress_requesting_copilot_review(),
+                progress_waiting_for_copilot_review(),
+                progress_applying_review_feedback(),
+            ],
+            vec![
+                "planning child #222".to_string(),
+                "implementing branch nightloop/221-222".to_string(),
+                "requesting copilot review".to_string(),
+                "waiting for copilot review".to_string(),
+                "applying review feedback".to_string(),
+            ]
+        );
     }
 }

@@ -239,7 +239,7 @@ fn real_main() -> Result<()> {
                 ]);
             }
             if !report.ok {
-                bail!("docs-check failed");
+                bail!("check failed");
             }
         }
         Command::SetupLabels => {
@@ -278,7 +278,7 @@ fn real_main() -> Result<()> {
             };
             report.print();
             if !report.ok {
-                bail!("run failed");
+                bail!("nightly failed");
             }
         }
         Command::ReviewLoop { parent, dry_run } => {
@@ -290,7 +290,7 @@ fn real_main() -> Result<()> {
             };
             report.print();
             if !report.ok {
-                bail!("review-loop failed");
+                bail!("start failed");
             }
         }
         Command::Help => unreachable!(),
@@ -357,14 +357,14 @@ where
 
     let command = match command_name.as_str() {
         "budget" => parse_budget(rest[1..].to_vec())?,
-        "lint-issue" => parse_lint_issue(rest[1..].to_vec())?,
-        "estimate-issue" => parse_estimate_issue(rest[1..].to_vec())?,
+        "lint" | "lint-issue" => parse_lint_issue(rest[1..].to_vec())?,
+        "estimate" | "estimate-issue" => parse_estimate_issue(rest[1..].to_vec())?,
         "record-run" => parse_record_run(rest[1..].to_vec())?,
-        "docs-check" => parse_docs_check(rest[1..].to_vec())?,
+        "check" | "docs-check" => parse_docs_check(rest[1..].to_vec())?,
         "setup-labels" => parse_setup_labels(rest[1..].to_vec())?,
-        "init-target" => parse_init_target(rest[1..].to_vec())?,
-        "run" => parse_run(rest[1..].to_vec())?,
-        "review-loop" => parse_review_loop(rest[1..].to_vec())?,
+        "init" | "init-target" => parse_init_target(rest[1..].to_vec())?,
+        "nightly" | "run" => parse_run(rest[1..].to_vec())?,
+        "start" | "review-loop" => parse_review_loop(rest[1..].to_vec())?,
         "help" => Command::Help,
         other => bail!("unknown command: {other}"),
     };
@@ -401,11 +401,11 @@ fn parse_budget(args: Vec<String>) -> Result<Command> {
 
 fn parse_lint_issue(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help(Some("lint-issue"));
+        print_help(Some("lint"));
         process::exit(0);
     }
     if args.len() != 1 {
-        bail!("lint-issue requires exactly one path");
+        bail!("lint requires exactly one path");
     }
     Ok(Command::LintIssue {
         path: PathBuf::from(&args[0]),
@@ -414,11 +414,11 @@ fn parse_lint_issue(args: Vec<String>) -> Result<Command> {
 
 fn parse_estimate_issue(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help(Some("estimate-issue"));
+        print_help(Some("estimate"));
         process::exit(0);
     }
     if args.is_empty() {
-        bail!("estimate-issue requires a path");
+        bail!("estimate requires a path");
     }
     let path = PathBuf::from(&args[0]);
     let mut basis = estimate::EstimateBasis::Hybrid;
@@ -431,7 +431,7 @@ fn parse_estimate_issue(args: Vec<String>) -> Result<Command> {
                     .ok_or_else(|| anyhow!("--basis requires a value"))?;
                 basis = estimate::EstimateBasis::from_cli_str(&value)?;
             }
-            other => bail!("unexpected argument for estimate-issue: {other}"),
+            other => bail!("unexpected argument for estimate: {other}"),
         }
     }
     Ok(Command::EstimateIssue { path, basis })
@@ -452,11 +452,11 @@ fn parse_record_run(args: Vec<String>) -> Result<Command> {
 
 fn parse_docs_check(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help(Some("docs-check"));
+        print_help(Some("check"));
         process::exit(0);
     }
     if !args.is_empty() {
-        bail!("docs-check does not accept additional arguments");
+        bail!("check does not accept additional arguments");
     }
     Ok(Command::DocsCheck)
 }
@@ -474,18 +474,19 @@ fn parse_setup_labels(args: Vec<String>) -> Result<Command> {
 
 fn parse_init_target(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help(Some("init-target"));
+        print_help(Some("init"));
         process::exit(0);
     }
     let mut name = None;
     let mut repo = None;
     let mut workdir = None;
     let mut base_branch = "main".to_string();
-    let mut agent_command = "codex exec".to_string();
-    let mut plan_command = "codex exec".to_string();
+    let mut agent_command = "codex exec --full-auto".to_string();
+    let mut plan_command = "codex exec --full-auto".to_string();
     let mut default_model = "gpt-5.4".to_string();
     let mut default_reasoning_effort = "medium".to_string();
     let mut request_copilot_review = false;
+    let mut positional = Vec::new();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -535,13 +536,26 @@ fn parse_init_target(args: Vec<String>) -> Result<Command> {
             "--request-copilot-review" => {
                 request_copilot_review = true;
             }
-            other => bail!("unexpected argument for init-target: {other}"),
+            other if other.starts_with("--") => bail!("unexpected argument for init: {other}"),
+            other => positional.push(other.to_string()),
         }
     }
+    if positional.len() > 3 {
+        bail!("init accepts at most NAME OWNER/REPO WORKDIR as positional arguments");
+    }
+    if name.is_none() {
+        name = positional.first().cloned();
+    }
+    if repo.is_none() {
+        repo = positional.get(1).cloned();
+    }
+    if workdir.is_none() {
+        workdir = positional.get(2).map(PathBuf::from);
+    }
     Ok(Command::InitTarget {
-        name: name.ok_or_else(|| anyhow!("init-target requires --name"))?,
-        repo: repo.ok_or_else(|| anyhow!("init-target requires --repo"))?,
-        workdir: workdir.ok_or_else(|| anyhow!("init-target requires --workdir"))?,
+        name: name.ok_or_else(|| anyhow!("init requires NAME or --name"))?,
+        repo: repo.ok_or_else(|| anyhow!("init requires OWNER/REPO or --repo"))?,
+        workdir: workdir.ok_or_else(|| anyhow!("init requires WORKDIR or --workdir"))?,
         base_branch,
         agent_command,
         plan_command,
@@ -553,7 +567,7 @@ fn parse_init_target(args: Vec<String>) -> Result<Command> {
 
 fn parse_review_loop(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help(Some("review-loop"));
+        print_help(Some("start"));
         process::exit(0);
     }
     let mut parent = None;
@@ -568,18 +582,24 @@ fn parse_review_loop(args: Vec<String>) -> Result<Command> {
                 parent = Some(value.parse::<u64>()?);
             }
             "--dry-run" => dry_run = true,
-            other => bail!("unexpected argument for review-loop: {other}"),
+            other if other.starts_with("--") => bail!("unexpected argument for start: {other}"),
+            other => {
+                if parent.is_some() {
+                    bail!("start accepts only one parent issue");
+                }
+                parent = Some(other.parse::<u64>()?);
+            }
         }
     }
     Ok(Command::ReviewLoop {
-        parent: parent.ok_or_else(|| anyhow!("review-loop requires --parent"))?,
+        parent: parent.ok_or_else(|| anyhow!("start requires PARENT_ISSUE"))?,
         dry_run,
     })
 }
 
 fn parse_run(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help(Some("run"));
+        print_help(Some("nightly"));
         process::exit(0);
     }
     let mut parent = None;
@@ -601,62 +621,80 @@ fn parse_run(args: Vec<String>) -> Result<Command> {
                 hours = Some(value.parse::<u32>()?);
             }
             "--dry-run" => dry_run = true,
-            other => bail!("unexpected argument for run: {other}"),
+            other if other.starts_with("--") => bail!("unexpected argument for nightly: {other}"),
+            other => {
+                if parent.is_some() {
+                    bail!("nightly accepts only one parent issue");
+                }
+                parent = Some(other.parse::<u64>()?);
+            }
         }
     }
     Ok(Command::Run {
-        parent: parent.ok_or_else(|| anyhow!("run requires --parent"))?,
-        hours: hours.ok_or_else(|| anyhow!("run requires --hours"))?,
+        parent: parent.ok_or_else(|| anyhow!("nightly requires PARENT_ISSUE"))?,
+        hours: hours.ok_or_else(|| anyhow!("nightly requires --hours"))?,
         dry_run,
     })
 }
 
 fn print_help(command: Option<&str>) {
     let text = match command {
+        Some("check") | Some("docs-check") => {
+            "Usage: nightloop check [--target NAME]\n\
+\n\
+Validate required docs, templates, and prompt files.\n\
+\n\
+Compatibility alias: docs-check\n"
+        }
+        Some("lint") | Some("lint-issue") => {
+            "Usage: nightloop lint path/to/issue.md [--target NAME]\n\
+\n\
+Validate a child issue markdown snapshot.\n\
+\n\
+Compatibility alias: lint-issue\n"
+        }
+        Some("estimate") | Some("estimate-issue") => {
+            "Usage: nightloop estimate path/to/issue.md [--target NAME] [--basis template|local|hybrid|ai]\n\
+\n\
+Estimate model selection and runtime for a child issue.\n\
+\n\
+Compatibility alias: estimate-issue\n"
+        }
+        Some("init") | Some("init-target") => {
+            "Usage: nightloop init NAME OWNER/REPO WORKDIR [--base-branch main] [--agent-command CMD] [--plan-command CMD] [--default-model MODEL] [--default-reasoning-effort LEVEL] [--request-copilot-review]\n\
+\n\
+Create targets/NAME.toml from the example template and fill common initial settings.\n\
+\n\
+Compatibility alias: init-target --name NAME --repo OWNER/REPO --workdir PATH\n"
+        }
+        Some("nightly") | Some("run") => {
+            "Usage: nightloop nightly PARENT_ISSUE [--target NAME] --hours 2|3|4|5|6 [--dry-run]\n\
+\n\
+Execute or simulate the budget-based nightly campaign.\n\
+\n\
+Compatibility alias: run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n"
+        }
+        Some("start") | Some("review-loop") => {
+            "Usage: nightloop start PARENT_ISSUE [--target NAME] [--dry-run]\n\
+\n\
+Plan, implement, request Copilot review, wait, and apply one fix round for the first runnable child issue.\n\
+\n\
+Compatibility alias: review-loop --parent ISSUE [--dry-run]\n"
+        }
         Some("budget") => {
             "Usage: nightloop [--config PATH] [--target NAME] budget --hours 2|3|4|5|6\n\
 \n\
 Compute the fallback slot count for a night window.\n"
-        }
-        Some("lint-issue") => {
-            "Usage: nightloop [--config PATH] [--target NAME] lint-issue path/to/issue.md\n\
-\n\
-Validate a child issue markdown snapshot.\n"
-        }
-        Some("estimate-issue") => {
-            "Usage: nightloop [--config PATH] [--target NAME] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
-\n\
-Estimate model selection and runtime for a child issue.\n"
         }
         Some("record-run") => {
             "Usage: nightloop [--config PATH] [--target NAME] record-run path/to/run-record.json\n\
 \n\
 Append a run record to local telemetry.\n"
         }
-        Some("docs-check") => {
-            "Usage: nightloop [--config PATH] [--target NAME] docs-check\n\
-\n\
-Validate required docs, templates, and prompt files.\n"
-        }
         Some("setup-labels") => {
-            "Usage: nightloop [--config PATH] [--target NAME] setup-labels\n\
+            "Usage: nightloop setup-labels [--target NAME]\n\
 \n\
 Create any missing workflow labels required by nightloop.\n"
-        }
-        Some("init-target") => {
-            "Usage: nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--base-branch main] [--agent-command CMD] [--plan-command CMD] [--default-model MODEL] [--default-reasoning-effort LEVEL] [--request-copilot-review]\n\
-\n\
-Create targets/NAME.toml from the example template and fill common initial settings.\n"
-        }
-        Some("run") => {
-            "Usage: nightloop [--config PATH] [--target NAME] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
-\n\
-Execute or simulate a parent issue campaign.\n"
-        }
-        Some("review-loop") => {
-            "Usage: nightloop [--config PATH] [--target NAME] review-loop --parent ISSUE [--dry-run]\n\
-\n\
-Plan, implement, request Copilot review, wait, and apply one fix round for the first runnable child issue.\n"
         }
         _ => {
             "nightloop\n\
@@ -664,15 +702,18 @@ Plan, implement, request Copilot review, wait, and apply one fix round for the f
 Issue-first nightly runner for coding agents.\n\
 \n\
 Usage:\n\
-  nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--agent-command CMD]\n\
-  nightloop [--target NAME] setup-labels\n\
-  nightloop [--target NAME] docs-check\n\
-  nightloop [--target NAME] lint-issue path/to/issue.md\n\
-  nightloop [--target NAME] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
-  nightloop [--target NAME] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
-  nightloop [--target NAME] review-loop --parent ISSUE [--dry-run]\n\
+  nightloop init NAME OWNER/REPO WORKDIR [--agent-command CMD]\n\
+  nightloop check [--target NAME]\n\
+  nightloop lint path/to/issue.md [--target NAME]\n\
+  nightloop estimate path/to/issue.md [--target NAME] [--basis template|local|hybrid|ai]\n\
+  nightloop start PARENT_ISSUE [--target NAME] [--dry-run]\n\
+  nightloop nightly PARENT_ISSUE [--target NAME] --hours 2|3|4|5|6 [--dry-run]\n\
+  nightloop setup-labels [--target NAME]\n\
   nightloop [--config PATH] budget --hours 2|3|4|5|6\n\
   nightloop [--config PATH] record-run path/to/run-record.json\n\
+\n\
+Compatibility aliases:\n\
+  init-target, docs-check, lint-issue, estimate-issue, review-loop, run\n\
 \n\
 Global options:\n\
   --config PATH   Explicit config path; overrides --target\n\
@@ -681,4 +722,92 @@ Global options:\n\
         }
     };
     println!("{text}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_cli, Command};
+
+    fn parse(args: &[&str]) -> Command {
+        parse_cli(args.iter().map(|arg| arg.to_string()))
+            .unwrap()
+            .command
+    }
+
+    #[test]
+    fn start_accepts_positional_parent_and_legacy_flag() {
+        match parse(&["start", "221", "--dry-run"]) {
+            Command::ReviewLoop { parent, dry_run } => {
+                assert_eq!(parent, 221);
+                assert!(dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        match parse(&["review-loop", "--parent", "222"]) {
+            Command::ReviewLoop { parent, dry_run } => {
+                assert_eq!(parent, 222);
+                assert!(!dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nightly_accepts_positional_parent_and_legacy_flag() {
+        match parse(&["nightly", "221", "--hours", "4"]) {
+            Command::Run {
+                parent,
+                hours,
+                dry_run,
+            } => {
+                assert_eq!(parent, 221);
+                assert_eq!(hours, 4);
+                assert!(!dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        match parse(&["run", "--parent", "222", "--hours", "2", "--dry-run"]) {
+            Command::Run {
+                parent,
+                hours,
+                dry_run,
+            } => {
+                assert_eq!(parent, 222);
+                assert_eq!(hours, 2);
+                assert!(dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn init_accepts_positional_form() {
+        match parse(&[
+            "init",
+            "canaria",
+            "UTAGEDA/canaria",
+            "/tmp/canaria",
+            "--request-copilot-review",
+        ]) {
+            Command::InitTarget {
+                name,
+                repo,
+                workdir,
+                agent_command,
+                plan_command,
+                request_copilot_review,
+                ..
+            } => {
+                assert_eq!(name, "canaria");
+                assert_eq!(repo, "UTAGEDA/canaria");
+                assert_eq!(workdir.to_string_lossy(), "/tmp/canaria");
+                assert_eq!(agent_command, "codex exec --full-auto");
+                assert_eq!(plan_command, "codex exec --full-auto");
+                assert!(request_copilot_review);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

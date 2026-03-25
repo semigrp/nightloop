@@ -78,6 +78,8 @@ pub struct ReviewLoopConfig {
     pub review_wait_timeout_minutes: u32,
     #[serde(default = "default_review_max_fix_rounds")]
     pub review_max_fix_rounds: u32,
+    #[serde(default = "default_planner_prompt_prefix")]
+    pub planner_prompt_prefix: String,
 }
 
 impl Default for ReviewLoopConfig {
@@ -86,6 +88,7 @@ impl Default for ReviewLoopConfig {
             review_poll_interval_seconds: default_review_poll_interval_seconds(),
             review_wait_timeout_minutes: default_review_wait_timeout_minutes(),
             review_max_fix_rounds: default_review_max_fix_rounds(),
+            planner_prompt_prefix: default_planner_prompt_prefix(),
         }
     }
 }
@@ -273,12 +276,12 @@ pub fn render_named_target_config(
             1,
         )
         .replacen(
-            r#"command = "codex exec""#,
+            r#"command = "codex exec --full-auto""#,
             &format!(r#"command = "{}""#, escape_toml_string(agent_command)),
             1,
         )
         .replacen(
-            r#"plan_command = "codex exec""#,
+            r#"plan_command = "codex exec --full-auto""#,
             &format!(r#"plan_command = "{}""#, escape_toml_string(plan_command)),
             1,
         )
@@ -323,6 +326,10 @@ fn default_review_wait_timeout_minutes() -> u32 {
 
 fn default_review_max_fix_rounds() -> u32 {
     1
+}
+
+fn default_planner_prompt_prefix() -> String {
+    "/plan".to_string()
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -442,6 +449,7 @@ template_weight = 0.35
             config.resolve_target_path(std::path::Path::new("README.md")),
             config.target_repo_root().join("README.md")
         );
+        assert_eq!(config.review_loop.planner_prompt_prefix, "/plan");
     }
 
     #[test]
@@ -498,6 +506,7 @@ template_weight = 0.35
         assert!(rendered.contains(r#"request_copilot_review = true"#));
         assert!(rendered.contains(r#"command = "codex exec --full-auto""#));
         assert!(rendered.contains(r#"plan_command = "codex exec --planner""#));
+        assert!(rendered.contains(r#"planner_prompt_prefix = "/plan""#));
         assert!(rendered.contains(r#"working_directory = "/tmp/canaria""#));
         assert!(rendered.contains(r#"default_model = "gpt-5.4-mini""#));
         assert!(rendered.contains(r#"default_reasoning_effort = "high""#));
