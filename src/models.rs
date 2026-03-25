@@ -313,9 +313,25 @@ pub struct RunRecord {
     pub files_touched: u32,
     pub success: bool,
     pub status: String,
+    #[serde(default = "default_workflow_kind")]
+    pub workflow: String,
+    #[serde(default)]
+    pub planner_used: bool,
     pub copilot_review: Option<String>,
+    #[serde(default)]
+    pub review_comments_total: u32,
+    #[serde(default)]
+    pub review_comments_applied: u32,
+    #[serde(default)]
+    pub review_comments_ignored: u32,
+    #[serde(default)]
+    pub fix_rounds: u32,
     pub branch: String,
     pub pr_base: String,
     pub pr_url: Option<String>,
     pub recorded_at: DateTime<Utc>,
+}
+
+fn default_workflow_kind() -> String {
+    "run".to_string()
 }

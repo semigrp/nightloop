@@ -12,6 +12,8 @@ pub struct Config {
     pub agent: Agent,
     #[serde(rename = "loop")]
     pub loop_cfg: LoopConfig,
+    #[serde(default)]
+    pub review_loop: ReviewLoopConfig,
     pub diff: DiffConfig,
     pub labels: Labels,
     pub docs: DocsConfig,
@@ -66,6 +68,26 @@ pub struct LoopConfig {
     pub one_pr_per_child: bool,
     #[serde(default = "default_run_root")]
     pub run_root: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ReviewLoopConfig {
+    #[serde(default = "default_review_poll_interval_seconds")]
+    pub review_poll_interval_seconds: u32,
+    #[serde(default = "default_review_wait_timeout_minutes")]
+    pub review_wait_timeout_minutes: u32,
+    #[serde(default = "default_review_max_fix_rounds")]
+    pub review_max_fix_rounds: u32,
+}
+
+impl Default for ReviewLoopConfig {
+    fn default() -> Self {
+        Self {
+            review_poll_interval_seconds: default_review_poll_interval_seconds(),
+            review_wait_timeout_minutes: default_review_wait_timeout_minutes(),
+            review_max_fix_rounds: default_review_max_fix_rounds(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,6 +311,18 @@ fn default_copilot_reviewer() -> String {
 
 fn default_run_root() -> PathBuf {
     PathBuf::from(".nightloop/runs")
+}
+
+fn default_review_poll_interval_seconds() -> u32 {
+    120
+}
+
+fn default_review_wait_timeout_minutes() -> u32 {
+    90
+}
+
+fn default_review_max_fix_rounds() -> u32 {
+    1
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

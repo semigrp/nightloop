@@ -37,6 +37,7 @@ fn write_common_files(root: &Path) {
         "refine_spec.md",
         "child_issue_from_plan.md",
         "estimate_issue.md",
+        "plan_child_issue.md",
     ] {
         fs::write(root.join("prompts").join(file), "prompt").unwrap();
     }
@@ -492,6 +493,29 @@ fn config_flag_overrides_named_target_and_help_mentions_target_workflow() {
     assert!(
         help_stdout.contains("nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH")
     );
+    assert!(help_stdout.contains("nightloop [--target NAME] setup-labels"));
+    assert!(
+        help_stdout.contains("nightloop [--target NAME] review-loop --parent ISSUE [--dry-run]")
+    );
     assert!(help_stdout.contains("--agent-command CMD"));
     assert!(help_stdout.contains("--target NAME"));
+}
+
+#[test]
+fn setup_labels_help_and_target_resolution_are_exposed() {
+    let root = temp_root("setup-labels-help");
+    let target = root.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("README.md"), "readme").unwrap();
+    fs::write(target.join("AGENTS.md"), "agents").unwrap();
+    let _named = write_target_config(&root, "canaria", &target);
+
+    let (help_code, help_stdout, help_stderr) = run_cli(&root, &["setup-labels", "--help"]);
+    assert_eq!(help_code, 0, "stderr={help_stderr}");
+    assert!(help_stdout.contains("Usage: nightloop [--config PATH] [--target NAME] setup-labels"));
+
+    let (missing_code, _missing_stdout, missing_stderr) =
+        run_cli(&root, &["setup-labels", "--target", "missing"]);
+    assert_ne!(missing_code, 0);
+    assert!(missing_stderr.contains("target_config_not_found"));
 }

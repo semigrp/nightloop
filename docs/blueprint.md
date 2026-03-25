@@ -31,12 +31,14 @@ An optional GitHub-specific post-PR hook may request review from `github-copilot
 Supported commands:
 
 - `nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /abs/path/to/repo`
+- `nightloop setup-labels`
 - `nightloop budget --hours 2|3|4|5|6`
 - `nightloop lint-issue path/to/issue.md`
 - `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
 - `nightloop record-run path/to/run-record.json`
 - `nightloop docs-check`
 - `nightloop run --parent 221 --hours 4 [--dry-run]`
+- `nightloop review-loop --parent 221 [--dry-run]`
 
 All command output is compact `key=value`.
 
@@ -46,11 +48,21 @@ Named target resolution order is:
 2. `--target NAME` -> `targets/NAME.toml`
 3. fallback `./nightloop.toml`
 
+`setup-labels` bootstraps the managed workflow labels from `[labels]` for the selected target repo and is safe to rerun.
+
 `run` reporting may include:
 
 - `target_repo_root=...`
 - `run_root=...`
 - `target_repo_match=true|false|unknown`
+
+`review-loop` is the Codex-first single-child workflow:
+
+- pick the first runnable child from the parent Issue
+- create a plan with `plan_command`
+- implement with `agent.command`
+- request Copilot review on the draft PR
+- wait for that review and run one fix pass
 
 `init-target` writes `targets/<name>.toml` from the shipped example template and fills:
 
@@ -156,6 +168,8 @@ A child Issue is eligible only if:
 - metadata is valid
 - the target size band fits within the configured global diff limits
 
+The workflow labels are not assumed to preexist in a fresh repo. Real runs auto-create any missing managed labels. `setup-labels` remains available as an explicit bootstrap command.
+
 ## 6. Estimation Policy
 
 Supported runtime modes:
@@ -177,6 +191,7 @@ Behavior:
 - local uses successful telemetry matched by model profile, target size, and docs impact
 - hybrid combines template and local using configured weights
 - ai invokes `agent.plan_command`, reads `prompts/estimate_issue.md`, expects JSON, and reports the AI result alongside the baseline
+- prompts are delivered via stdin and also exposed via `NIGHTLOOP_PROMPT_FILE`
 
 AI remains advisory. Scheduler logic continues using the baseline estimate.
 
@@ -196,6 +211,12 @@ Preflight also checks:
 
 A remote mismatch is a hard failure with `target_repo_mismatch`. Missing `origin` is allowed and reported as `target_repo_match=unknown`.
 
+Dry-run also reports repair actions that a real run would apply:
+
+- missing managed labels
+- stale `agent:running` or `agent:blocked` child state
+- stale managed local branches for selected children
+
 ### Real run
 
 Real execution:
@@ -205,8 +226,8 @@ Real execution:
 3. prepares the same campaign plan as dry-run
 4. creates `<loop.run_root>/<timestamp>-parent-<id>/child-<id>/`
 5. snapshots issue metadata and writes the prompt file
-6. adds `agent:running`
-7. creates the child branch
+6. creates the child branch
+7. adds `agent:running`
 8. executes `agent.command`
 9. runs parsed verification commands locally
 10. measures diff lines with `git diff --numstat <base_sha> HEAD`
@@ -225,6 +246,19 @@ Real execution:
    - append telemetry
    - stop when `stop_on_failure = true`
 13. comment on the parent Issue with selected, completed, blocked, skipped, PR chain, and estimated vs actual minutes
+
+Prompt transport is dual-path by default:
+
+- stdin carries the full prompt text
+- `NIGHTLOOP_PROMPT_FILE` points at the written prompt file for tools that prefer file reads
+
+Failure guardrails:
+
+- the clean-worktree check ignores files under the resolved `loop.run_root`
+- real runs auto-create missing managed labels
+- selected children with stale `agent:running` or `agent:blocked` are normalized back to `agent:ready`
+- stale managed local branches named `nightloop/<parent>-<child>` are deleted and recreated automatically
+- setup-only failures restore accidental `agent:running` state, clean up the created managed branch when possible, and do not mark the child `agent:blocked`
 
 ## 8. Stacked PR Strategy
 

@@ -17,6 +17,7 @@ const REQUIRED_PROMPT_FILES: &[&str] = &[
     "prompts/refine_spec.md",
     "prompts/child_issue_from_plan.md",
     "prompts/estimate_issue.md",
+    "prompts/plan_child_issue.md",
 ];
 
 #[derive(Debug)]

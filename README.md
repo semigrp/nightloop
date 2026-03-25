@@ -19,12 +19,14 @@ The core stays provider-agnostic. `nightloop` shells out to local tools instead 
 This repository now implements the v0 CLI surface:
 
 - `nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /abs/path/to/repo`
+- `nightloop setup-labels`
 - `nightloop budget --hours 2|3|4|5|6`
 - `nightloop lint-issue path/to/issue.md`
 - `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
 - `nightloop record-run path/to/run-record.json`
 - `nightloop docs-check`
 - `nightloop run --parent 221 --hours 4 [--dry-run]`
+- `nightloop review-loop --parent 221 [--dry-run]`
 
 Output is intentionally compact and machine-readable. Each line is a `key=value` record.
 
@@ -59,8 +61,14 @@ nightloop init-target \
 ```
 
 2. Ensure `gh` is authenticated for the target repository.
-3. Author parent and child Issues using the templates in [`.github/ISSUE_TEMPLATE/`](/Users/semigrp/dev/nightloop/.github/ISSUE_TEMPLATE).
-4. Check issue quality locally:
+3. Bootstrap workflow labels once for the target repository:
+
+```sh
+nightloop setup-labels --target canaria
+```
+
+4. Author parent and child Issues using the templates in [`.github/ISSUE_TEMPLATE/`](/Users/semigrp/dev/nightloop/.github/ISSUE_TEMPLATE).
+5. Check issue quality locally:
 
 ```sh
 nightloop docs-check --target canaria
@@ -68,13 +76,13 @@ nightloop lint-issue --target canaria path/to/child-issue.md
 nightloop estimate-issue --target canaria path/to/child-issue.md --basis hybrid
 ```
 
-5. Simulate a campaign:
+6. Simulate a campaign:
 
 ```sh
 nightloop run --target canaria --parent 221 --hours 4 --dry-run
 ```
 
-6. Execute the campaign for real:
+7. Execute the campaign for real:
 
 ```sh
 nightloop run --target canaria --parent 221 --hours 4
@@ -109,6 +117,7 @@ Recommended layout:
 - keep the `nightloop` source checkout as the control repo
 - point `agent.working_directory` at the target repo checkout
 - keep `loop.run_root` and `[telemetry].history_path` relative so they land under the target repo by default
+- files under the resolved `loop.run_root` are ignored by the clean-worktree preflight, so reruns do not fail just because prior run artifacts exist
 
 Example:
 
@@ -129,6 +138,7 @@ default_reasoning_effort = "medium"
 Normal invocation from the control repo:
 
 ```sh
+nightloop setup-labels --target canaria
 nightloop docs-check --target canaria
 nightloop run --target canaria --parent 221 --hours 4 --dry-run
 ```
@@ -236,6 +246,28 @@ A child Issue is eligible only if all of the following are true:
 - child metadata parses and lints successfully
 - the target size band fits within the configured global diff limits
 
+`nightloop run` auto-creates any missing managed workflow labels before a real campaign starts. `setup-labels` remains available as an explicit bootstrap command.
+
+## Review Loop
+
+`nightloop review-loop` is the Codex-first single-child path.
+
+Behavior:
+
+- chooses the first runnable child Issue from the parent campaign
+- runs `plan_command` first and saves the plan artifact
+- runs `agent.command` to implement that child
+- creates a draft PR and requests Copilot review
+- waits for Copilot review on the latest PR head SHA
+- runs one review-fix pass with the Copilot comments and updates the PR branch
+
+Example:
+
+```sh
+nightloop review-loop --target canaria --parent 221 --dry-run
+nightloop review-loop --target canaria --parent 221
+```
+
 ## Estimation Modes
 
 The CLI supports four estimation modes:
@@ -261,6 +293,21 @@ When `--basis ai` is requested:
 - the CLI reports the AI estimate alongside the baseline
 - scheduler logic still uses the baseline estimate
 
+Prompt delivery contract:
+
+- `nightloop` writes the prompt to `NIGHTLOOP_PROMPT_FILE`
+- `nightloop` also sends the same prompt on stdin to `agent.command` and `plan_command`
+- stdin-oriented CLIs such as `codex exec` work without shell wrappers
+
+Review loop config:
+
+```toml
+[review_loop]
+review_poll_interval_seconds = 120
+review_wait_timeout_minutes = 90
+review_max_fix_rounds = 1
+```
+
 ## Run Behavior
 
 ### Dry Run
@@ -279,6 +326,12 @@ Dry-run makes no GitHub writes and no git changes.
 
 Before planning, dry-run also checks that the target repo exists, is a git worktree, and that its `origin` remote matches `github.owner/repo` when `origin` is configured. A mismatch fails with `target_repo_mismatch`. If no `origin` exists, the run continues with `target_repo_match=unknown`.
 
+Dry-run also reports repairs that would be applied during a real run:
+
+- missing managed labels as `label=<name> status=would_create`
+- stale `agent:running` / `agent:blocked` child state as `repair=would_*`
+- stale managed branches as `repair=would_deleted_stale_branch`
+
 ### Real Run
 
 `nightloop run`:
@@ -287,8 +340,8 @@ Before planning, dry-run also checks that the target repo exists, is a git workt
 2. fetches and prepares the campaign exactly as dry-run does
 3. creates `<loop.run_root>/<timestamp>-parent-<id>/child-<id>/`
 4. snapshots issue metadata and writes an agent prompt file
-5. moves the child Issue from `agent:ready` to `agent:running`
-6. creates a stacked branch for the child
+5. creates a stacked branch for the child
+6. moves the child Issue from `agent:ready` to `agent:running`
 7. executes `agent.command`
 8. runs the parsed verification commands locally
 9. measures changed lines with `git diff --numstat <base_sha> HEAD`
@@ -307,6 +360,16 @@ Before planning, dry-run also checks that the target repo exists, is a git workt
    - appends telemetry
    - stops the campaign when `stop_on_failure = true`
 12. comments a concise summary on the parent Issue
+
+`agent_command_failed` can still happen for tool-specific failures, but prompt transport should no longer be the cause for stdin-based CLIs.
+
+Guardrails:
+
+- real runs auto-create missing managed labels
+- selected children with stale `agent:running` or `agent:blocked` are normalized back to `agent:ready` before execution
+- stale managed local branches named `nightloop/<parent>-<child>` are deleted and recreated automatically
+- setup failures such as dirty worktrees or prompt write failures do not mark the child `agent:blocked`
+- if a pre-execution setup step fails after labels changed, `nightloop` removes accidental `agent:running` state, restores `agent:ready`, and removes the created managed branch when possible
 
 ### Stacked PR Strategy
 

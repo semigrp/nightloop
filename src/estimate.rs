@@ -229,7 +229,7 @@ fn request_ai_estimate(config: &Config, child: &ChildIssue) -> Result<AiEstimate
     ));
     fs::create_dir_all(&temp_dir)?;
     let prompt_path = temp_dir.join("estimate-prompt.md");
-    fs::write(&prompt_path, prompt)?;
+    fs::write(&prompt_path, &prompt)?;
 
     let result = agent_exec::run_shell_command(
         &config.agent.plan_command,
@@ -245,7 +245,7 @@ fn request_ai_estimate(config: &Config, child: &ChildIssue) -> Result<AiEstimate
             ),
             ("NIGHTLOOP_CHILD_TITLE".to_string(), child.title.clone()),
         ],
-        None,
+        Some(&prompt),
     )?;
     if !result.success() {
         bail!("ai_command_failed");
@@ -446,7 +446,13 @@ template_weight = 0.35
                 files_touched: 2,
                 success: true,
                 status: "success".to_string(),
+                workflow: "run".to_string(),
+                planner_used: false,
                 copilot_review: None,
+                review_comments_total: 0,
+                review_comments_applied: 0,
+                review_comments_ignored: 0,
+                fix_rounds: 0,
                 branch: "b".to_string(),
                 pr_base: "main".to_string(),
                 pr_url: None,
@@ -474,7 +480,13 @@ template_weight = 0.35
                     files_touched: 2,
                     success: true,
                     status: "success".to_string(),
+                    workflow: "run".to_string(),
+                    planner_used: false,
                     copilot_review: None,
+                    review_comments_total: 0,
+                    review_comments_applied: 0,
+                    review_comments_ignored: 0,
+                    fix_rounds: 0,
                     branch: "c".to_string(),
                     pr_base: "main".to_string(),
                     pr_url: None,
@@ -496,5 +508,98 @@ template_weight = 0.35
         )
         .unwrap();
         assert_eq!(ai.estimated_minutes, 65);
+    }
+
+    #[test]
+    fn ai_estimate_command_receives_prompt_via_stdin() {
+        let root = env::temp_dir().join(format!("nightloop-estimate-stdin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("prompts")).unwrap();
+        fs::write(root.join("prompts/estimate_issue.md"), "Return JSON only.").unwrap();
+        fs::write(root.join("README.md"), "readme").unwrap();
+
+        let config_path = root.join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"[github]
+owner = "o"
+repo = "r"
+base_branch = "main"
+request_copilot_review = false
+copilot_reviewer = "github-copilot[bot]"
+
+[agent]
+command = "echo agent"
+plan_command = "python3 -c 'import sys; data=sys.stdin.read(); print(\"{{\\\"model_profile\\\":\\\"balanced\\\",\\\"estimated_minutes\\\":65,\\\"confidence\\\":\\\"medium\\\",\\\"notes\\\":\\\"stdin-ok\\\"}}\" if data else \"\")'"
+working_directory = "{}"
+default_model = "gpt-5.4"
+default_reasoning_effort = "medium"
+
+[[agent.model_profiles]]
+name = "balanced"
+model = "gpt-5.4"
+reasoning_effort = "medium"
+intended_for = "default"
+max_size = "M"
+runtime_multiplier = 1.0
+
+[loop]
+default_hours = 4
+min_hours = 2
+max_hours = 6
+fallback_cycle_minutes = 40
+fixed_overhead_minutes = 20
+stop_on_failure = true
+one_branch_per_child = true
+one_pr_per_child = true
+run_root = ".nightloop/runs"
+
+[diff]
+min_lines = 50
+max_lines = 1000
+allow_doc_only_below_min = true
+
+[labels]
+campaign = "campaign"
+night_run = "night-run"
+ready = "agent:ready"
+running = "agent:running"
+review = "agent:review"
+blocked = "agent:blocked"
+done = "agent:done"
+
+[docs]
+required_paths = ["README.md"]
+
+[estimation]
+default_basis = "hybrid"
+allow_ai_assist = true
+template_minutes_xs = 35
+template_minutes_s = 50
+template_minutes_m = 80
+template_minutes_l = 120
+dependency_penalty_minutes = 5
+docs_penalty_readme = 5
+docs_penalty_user_facing = 10
+docs_penalty_architecture = 15
+
+[telemetry]
+history_path = "{}"
+min_samples_for_local = 2
+local_weight = 0.65
+template_weight = 0.35
+"#,
+                root.display(),
+                root.join("history.jsonl").display()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        let report = estimate_child_issue(&config, &child(), EstimateBasis::Ai).unwrap();
+        let ai = report.ai_estimate.expect("expected ai estimate");
+        assert_eq!(ai.notes, "stdin-ok");
     }
 }

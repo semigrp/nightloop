@@ -23,6 +23,7 @@ enum Command {
         path: PathBuf,
     },
     DocsCheck,
+    SetupLabels,
     InitTarget {
         name: String,
         repo: String,
@@ -37,6 +38,10 @@ enum Command {
     Run {
         parent: u64,
         hours: u32,
+        dry_run: bool,
+    },
+    ReviewLoop {
+        parent: u64,
         dry_run: bool,
     },
     Help,
@@ -66,7 +71,7 @@ fn real_main() -> Result<()> {
         return Ok(());
     }
     let cwd = env::current_dir()?;
-    let config = if matches!(cli.command, Command::InitTarget { .. }) {
+    let config = if matches!(cli.command, Command::InitTarget { .. } | Command::Help) {
         None
     } else {
         Some(load_config_for_cli(&cwd, &cli)?)
@@ -237,6 +242,29 @@ fn real_main() -> Result<()> {
                 bail!("docs-check failed");
             }
         }
+        Command::SetupLabels => {
+            let config = config.as_ref().unwrap();
+            let github = nightloop::github::GitHubClient::new(config);
+            github.check_auth()?;
+            let statuses = github.setup_labels()?;
+            let created_count = statuses
+                .iter()
+                .filter(|item| item.status == "created")
+                .count();
+            let existing_count = statuses
+                .iter()
+                .filter(|item| item.status == "exists")
+                .count();
+            reporting::print_pairs(&[
+                ("ok", "true".to_string()),
+                ("repo", config.repo_slug()),
+                ("created_count", created_count.to_string()),
+                ("existing_count", existing_count.to_string()),
+            ]);
+            for item in statuses {
+                reporting::print_pairs(&[("label", item.name), ("status", item.status)]);
+            }
+        }
         Command::Run {
             parent,
             hours,
@@ -251,6 +279,18 @@ fn real_main() -> Result<()> {
             report.print();
             if !report.ok {
                 bail!("run failed");
+            }
+        }
+        Command::ReviewLoop { parent, dry_run } => {
+            let config = config.as_ref().unwrap();
+            let report = if dry_run {
+                runner::review_loop_dry_run(&config, parent)?
+            } else {
+                runner::review_loop(&config, parent)?
+            };
+            report.print();
+            if !report.ok {
+                bail!("review-loop failed");
             }
         }
         Command::Help => unreachable!(),
@@ -321,8 +361,10 @@ where
         "estimate-issue" => parse_estimate_issue(rest[1..].to_vec())?,
         "record-run" => parse_record_run(rest[1..].to_vec())?,
         "docs-check" => parse_docs_check(rest[1..].to_vec())?,
+        "setup-labels" => parse_setup_labels(rest[1..].to_vec())?,
         "init-target" => parse_init_target(rest[1..].to_vec())?,
         "run" => parse_run(rest[1..].to_vec())?,
+        "review-loop" => parse_review_loop(rest[1..].to_vec())?,
         "help" => Command::Help,
         other => bail!("unknown command: {other}"),
     };
@@ -419,6 +461,17 @@ fn parse_docs_check(args: Vec<String>) -> Result<Command> {
     Ok(Command::DocsCheck)
 }
 
+fn parse_setup_labels(args: Vec<String>) -> Result<Command> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help(Some("setup-labels"));
+        process::exit(0);
+    }
+    if !args.is_empty() {
+        bail!("setup-labels does not accept additional arguments");
+    }
+    Ok(Command::SetupLabels)
+}
+
 fn parse_init_target(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help(Some("init-target"));
@@ -498,6 +551,32 @@ fn parse_init_target(args: Vec<String>) -> Result<Command> {
     })
 }
 
+fn parse_review_loop(args: Vec<String>) -> Result<Command> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help(Some("review-loop"));
+        process::exit(0);
+    }
+    let mut parent = None;
+    let mut dry_run = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--parent" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--parent requires a value"))?;
+                parent = Some(value.parse::<u64>()?);
+            }
+            "--dry-run" => dry_run = true,
+            other => bail!("unexpected argument for review-loop: {other}"),
+        }
+    }
+    Ok(Command::ReviewLoop {
+        parent: parent.ok_or_else(|| anyhow!("review-loop requires --parent"))?,
+        dry_run,
+    })
+}
+
 fn parse_run(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help(Some("run"));
@@ -559,6 +638,11 @@ Append a run record to local telemetry.\n"
 \n\
 Validate required docs, templates, and prompt files.\n"
         }
+        Some("setup-labels") => {
+            "Usage: nightloop [--config PATH] [--target NAME] setup-labels\n\
+\n\
+Create any missing workflow labels required by nightloop.\n"
+        }
         Some("init-target") => {
             "Usage: nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--base-branch main] [--agent-command CMD] [--plan-command CMD] [--default-model MODEL] [--default-reasoning-effort LEVEL] [--request-copilot-review]\n\
 \n\
@@ -569,6 +653,11 @@ Create targets/NAME.toml from the example template and fill common initial setti
 \n\
 Execute or simulate a parent issue campaign.\n"
         }
+        Some("review-loop") => {
+            "Usage: nightloop [--config PATH] [--target NAME] review-loop --parent ISSUE [--dry-run]\n\
+\n\
+Plan, implement, request Copilot review, wait, and apply one fix round for the first runnable child issue.\n"
+        }
         _ => {
             "nightloop\n\
 \n\
@@ -576,10 +665,12 @@ Issue-first nightly runner for coding agents.\n\
 \n\
 Usage:\n\
   nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--agent-command CMD]\n\
+  nightloop [--target NAME] setup-labels\n\
   nightloop [--target NAME] docs-check\n\
   nightloop [--target NAME] lint-issue path/to/issue.md\n\
   nightloop [--target NAME] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
   nightloop [--target NAME] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
+  nightloop [--target NAME] review-loop --parent ISSUE [--dry-run]\n\
   nightloop [--config PATH] budget --hours 2|3|4|5|6\n\
   nightloop [--config PATH] record-run path/to/run-record.json\n\
 \n\

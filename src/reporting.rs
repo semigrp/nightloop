@@ -8,9 +8,13 @@ pub fn print_pairs(pairs: &[(&str, String)]) {
 }
 
 pub fn escape_value(value: &str) -> String {
-    let needs_quotes = value.chars().any(|ch| ch.is_whitespace()) || value.contains('"');
+    let sanitized = value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    let needs_quotes = sanitized.chars().any(|ch| ch.is_whitespace()) || sanitized.contains('"');
     if !needs_quotes {
-        return value.to_string();
+        return sanitized;
     }
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", sanitized.replace('"', "\\\""))
 }
