@@ -306,9 +306,13 @@ review_poll_interval_seconds = 120
 review_wait_timeout_minutes = 90
 review_max_fix_rounds = 1
 planner_prompt_prefix = "/plan"
+auto_split_stages = true
+max_split_stages = 4
 ```
 
 For Codex, keep `plan_command` as a normal executable such as `codex exec --full-auto`. `nightloop` injects `/plan` into the planner prompt automatically. Do not set `plan_command = "codex exec /plan"`.
+
+If the planner decides that a child Issue should be split, `start` stores the staged plan in the target repo under `.nightloop/splits/` and opens only one stage PR at a time. A later `start` run advances to the next stage only after the active stage PR is merged. `nightly` never auto-splits into multiple PRs; it reports `split_required` and leaves that child for `start`.
 
 ## Run Behavior
 

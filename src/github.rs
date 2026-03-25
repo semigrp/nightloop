@@ -29,6 +29,15 @@ pub struct CopilotReviewBundle {
     pub threads: Vec<CopilotReviewThread>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestLifecycle {
+    pub number: u64,
+    pub url: String,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+}
+
 impl<'a> GitHubClient<'a> {
     pub fn new(config: &'a Config) -> Self {
         Self { config }
@@ -336,6 +345,33 @@ impl<'a> GitHubClient<'a> {
             threads,
         })
     }
+
+    pub fn pull_request_lifecycle(&self, pr_number: u64) -> Result<PullRequestLifecycle> {
+        let command = format!(
+            "gh api repos/{}/pulls/{}",
+            self.config.repo_slug(),
+            pr_number
+        );
+        let result =
+            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        if !result.success() {
+            bail!("gh_pr_view_failed");
+        }
+        let parsed = serde_json::from_str::<PullRequestJson>(&result.stdout)
+            .context("failed to parse pr json")?;
+        Ok(PullRequestLifecycle {
+            number: parsed.number,
+            url: parsed.html_url,
+            state: parsed.state,
+            merged: parsed.merged_at.is_some(),
+            draft: parsed.draft,
+        })
+    }
+
+    pub fn pull_request_lifecycle_from_url(&self, pr_url: &str) -> Result<PullRequestLifecycle> {
+        let pr_number = self.pr_number_from_url(pr_url)?;
+        self.pull_request_lifecycle(pr_number)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,6 +404,11 @@ struct RepoLabelJson {
 
 #[derive(Debug, Deserialize)]
 struct PullRequestJson {
+    number: u64,
+    state: String,
+    draft: bool,
+    html_url: String,
+    merged_at: Option<String>,
     head: PullHeadJson,
 }
 

@@ -326,6 +326,16 @@ pub struct RunRecord {
     pub review_comments_ignored: u32,
     #[serde(default)]
     pub fix_rounds: u32,
+    #[serde(default)]
+    pub split_mode: Option<String>,
+    #[serde(default)]
+    pub stage_index: Option<u32>,
+    #[serde(default)]
+    pub stage_total: Option<u32>,
+    #[serde(default)]
+    pub stage_completed: bool,
+    #[serde(default)]
+    pub active_pr_url: Option<String>,
     pub branch: String,
     pub pr_base: String,
     pub pr_url: Option<String>,

@@ -411,6 +411,8 @@ fn init_target_and_named_target_invocation_work() {
     assert!(named_contents.contains(r#"command = "codex exec --full-auto""#));
     assert!(named_contents.contains(r#"plan_command = "codex exec --full-auto""#));
     assert!(named_contents.contains(r#"planner_prompt_prefix = "/plan""#));
+    assert!(named_contents.contains(r#"auto_split_stages = true"#));
+    assert!(named_contents.contains(r#"max_split_stages = 4"#));
     assert!(named_contents.contains(r#"default_model = "gpt-5.4-mini""#));
     assert!(named_contents.contains(r#"default_reasoning_effort = "high""#));
     assert!(named_contents.contains(r#"request_copilot_review = true"#));

@@ -80,6 +80,10 @@ pub struct ReviewLoopConfig {
     pub review_max_fix_rounds: u32,
     #[serde(default = "default_planner_prompt_prefix")]
     pub planner_prompt_prefix: String,
+    #[serde(default = "default_auto_split_stages")]
+    pub auto_split_stages: bool,
+    #[serde(default = "default_max_split_stages")]
+    pub max_split_stages: u32,
 }
 
 impl Default for ReviewLoopConfig {
@@ -89,6 +93,8 @@ impl Default for ReviewLoopConfig {
             review_wait_timeout_minutes: default_review_wait_timeout_minutes(),
             review_max_fix_rounds: default_review_max_fix_rounds(),
             planner_prompt_prefix: default_planner_prompt_prefix(),
+            auto_split_stages: default_auto_split_stages(),
+            max_split_stages: default_max_split_stages(),
         }
     }
 }
@@ -193,6 +199,10 @@ impl Config {
 
     pub fn telemetry_history_path(&self) -> PathBuf {
         self.resolve_target_path(&self.telemetry.history_path)
+    }
+
+    pub fn split_state_root(&self) -> PathBuf {
+        self.resolve_target_path(Path::new(".nightloop/splits"))
     }
 
     pub fn resolve_target_path(&self, path: &Path) -> PathBuf {
@@ -330,6 +340,14 @@ fn default_review_max_fix_rounds() -> u32 {
 
 fn default_planner_prompt_prefix() -> String {
     "/plan".to_string()
+}
+
+fn default_auto_split_stages() -> bool {
+    true
+}
+
+fn default_max_split_stages() -> u32 {
+    4
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -507,6 +525,8 @@ template_weight = 0.35
         assert!(rendered.contains(r#"command = "codex exec --full-auto""#));
         assert!(rendered.contains(r#"plan_command = "codex exec --planner""#));
         assert!(rendered.contains(r#"planner_prompt_prefix = "/plan""#));
+        assert!(rendered.contains(r#"auto_split_stages = true"#));
+        assert!(rendered.contains(r#"max_split_stages = 4"#));
         assert!(rendered.contains(r#"working_directory = "/tmp/canaria""#));
         assert!(rendered.contains(r#"default_model = "gpt-5.4-mini""#));
         assert!(rendered.contains(r#"default_reasoning_effort = "high""#));

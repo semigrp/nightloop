@@ -75,6 +75,8 @@ Named target resolution order is:
 
 For Codex, `plan_command` remains a normal execution command. The planner prompt is prefixed with `/plan` automatically via `review_loop.planner_prompt_prefix`.
 
+When a child Issue is too large for one reviewable PR, `start` may persist a staged split plan under `.nightloop/splits/` in the target repo and advance one stage PR per run. `nightly` does not emit staged PRs; it reports `split_required` instead.
+
 `init` writes `targets/<name>.toml` from the shipped example template and fills:
 
 - `github.owner`

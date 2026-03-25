@@ -209,13 +209,18 @@ pub fn push_current_branch(workdir: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn diff_against(workdir: &Path, base_sha: &str) -> Result<DiffStat> {
-    let result = agent_exec::run_shell_command(
-        &format!("git diff --numstat {} HEAD", shell_quote(base_sha)),
-        workdir,
-        &[],
-        None,
-    )?;
+pub fn diff_against(workdir: &Path, base_sha: &str, ignored_paths: &[PathBuf]) -> Result<DiffStat> {
+    let mut command = format!("git diff --numstat {} -- .", shell_quote(base_sha));
+    for ignored in ignored_paths {
+        if let Ok(relative) = ignored.strip_prefix(workdir) {
+            if !relative.as_os_str().is_empty() {
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                command.push(' ');
+                command.push_str(&shell_quote(&format!(":(exclude){relative}")));
+            }
+        }
+    }
+    let result = agent_exec::run_shell_command(&command, workdir, &[], None)?;
     if !result.success() {
         bail!("git_diff_failed");
     }
@@ -281,7 +286,9 @@ pub fn parse_origin_repo_slug(url: &str) -> Option<String> {
 mod tests {
     use std::{env, fs, path::Path, process::Command};
 
-    use super::{local_branch_exists, parse_origin_repo_slug, worktree_status};
+    use super::{
+        diff_against, local_branch_exists, parse_origin_repo_slug, worktree_status, DiffStat,
+    };
 
     fn git(dir: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -399,5 +406,47 @@ mod tests {
 
         assert!(local_branch_exists(&root, "nightloop/221-222").unwrap());
         assert!(!local_branch_exists(&root, "nightloop/999-999").unwrap());
+    }
+
+    #[test]
+    fn diff_against_counts_worktree_changes_and_ignores_run_root() {
+        let root = env::temp_dir().join(format!("nightloop-gitops-diff-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init"]);
+        fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+        let base = Command::new("git")
+            .current_dir(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
+
+        fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+        let run_root = root.join(".nightloop/runs");
+        fs::create_dir_all(&run_root).unwrap();
+        fs::write(run_root.join("artifact.log"), "ignore").unwrap();
+
+        let stat = diff_against(&root, &base, &[run_root]).unwrap();
+        assert_eq!(
+            stat,
+            DiffStat {
+                changed_lines: 1,
+                files_touched: 1,
+            }
+        );
     }
 }
