@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Result};
 
 use crate::{
-    agent_exec,
+    agent_exec::{self, CommandRunOptions},
     diff_budget::{self, DiffStat},
 };
 
@@ -33,7 +33,8 @@ impl GitFailureDetail {
 
 pub fn worktree_status(workdir: &Path, ignored_paths: &[PathBuf]) -> Result<WorktreeStatus> {
     let command = build_status_command(workdir, ignored_paths);
-    let result = agent_exec::run_shell_command(&command, workdir, &[], None)?;
+    let result =
+        agent_exec::run_shell_command(&command, workdir, &[], CommandRunOptions::streaming("git"))?;
     if !result.success() {
         bail!("git_status_failed");
     }
@@ -58,8 +59,12 @@ pub fn ensure_clean_worktree(workdir: &Path, ignored_paths: &[PathBuf]) -> Resul
 }
 
 pub fn ensure_git_worktree(workdir: &Path) -> Result<()> {
-    let result =
-        agent_exec::run_shell_command("git rev-parse --is-inside-work-tree", workdir, &[], None)?;
+    let result = agent_exec::run_shell_command(
+        "git rev-parse --is-inside-work-tree",
+        workdir,
+        &[],
+        CommandRunOptions::streaming("git"),
+    )?;
     if !result.success() || result.stdout.trim() != "true" {
         bail!("target_repo_not_git_repo");
     }
@@ -67,7 +72,12 @@ pub fn ensure_git_worktree(workdir: &Path) -> Result<()> {
 }
 
 pub fn origin_repo_slug(workdir: &Path) -> Result<Option<String>> {
-    let result = agent_exec::run_shell_command("git remote get-url origin", workdir, &[], None)?;
+    let result = agent_exec::run_shell_command(
+        "git remote get-url origin",
+        workdir,
+        &[],
+        CommandRunOptions::streaming("git"),
+    )?;
     if !result.success() {
         return Ok(None);
     }
@@ -79,7 +89,7 @@ pub fn switch_branch(workdir: &Path, branch: &str) -> Result<()> {
         &format!("git switch {}", shell_quote(branch)),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     if !result.success() {
         bail!("git_switch_failed");
@@ -108,7 +118,7 @@ pub fn create_branch_detailed(
         ),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     if result.success() {
         return Ok(None);
@@ -128,7 +138,7 @@ pub fn rev_parse(workdir: &Path, value: &str) -> Result<String> {
         &format!("git rev-parse {}", shell_quote(value)),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     if !result.success() {
         bail!("git_rev_parse_failed");
@@ -143,7 +153,12 @@ pub fn rev_parse(workdir: &Path, value: &str) -> Result<String> {
 }
 
 pub fn current_branch(workdir: &Path) -> Result<String> {
-    let result = agent_exec::run_shell_command("git branch --show-current", workdir, &[], None)?;
+    let result = agent_exec::run_shell_command(
+        "git branch --show-current",
+        workdir,
+        &[],
+        CommandRunOptions::streaming("git"),
+    )?;
     if !result.success() {
         bail!("git_branch_current_failed");
     }
@@ -158,7 +173,7 @@ pub fn local_branch_exists(workdir: &Path, branch: &str) -> Result<bool> {
         ),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     Ok(result.status_code == 0)
 }
@@ -171,7 +186,7 @@ pub fn delete_local_branch(workdir: &Path, branch: &str, switch_to: &str) -> Res
         &format!("git branch -D {}", shell_quote(branch)),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     if !result.success() {
         bail!("git_branch_delete_failed");
@@ -180,7 +195,12 @@ pub fn delete_local_branch(workdir: &Path, branch: &str, switch_to: &str) -> Res
 }
 
 pub fn commit_all(workdir: &Path, message: &str) -> Result<()> {
-    let add = agent_exec::run_shell_command("git add -A", workdir, &[], None)?;
+    let add = agent_exec::run_shell_command(
+        "git add -A",
+        workdir,
+        &[],
+        CommandRunOptions::streaming("git"),
+    )?;
     if !add.success() {
         bail!("git_add_failed");
     }
@@ -188,7 +208,7 @@ pub fn commit_all(workdir: &Path, message: &str) -> Result<()> {
         &format!("git commit -m {}", shell_quote(message)),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     if !commit.success() {
         bail!("git_commit_failed");
@@ -201,7 +221,7 @@ pub fn push_current_branch(workdir: &Path, branch: &str) -> Result<()> {
         &format!("git push --set-upstream origin {}", shell_quote(branch)),
         workdir,
         &[],
-        None,
+        CommandRunOptions::streaming("git"),
     )?;
     if !result.success() {
         bail!("git_push_failed");
@@ -220,7 +240,8 @@ pub fn diff_against(workdir: &Path, base_sha: &str, ignored_paths: &[PathBuf]) -
             }
         }
     }
-    let result = agent_exec::run_shell_command(&command, workdir, &[], None)?;
+    let result =
+        agent_exec::run_shell_command(&command, workdir, &[], CommandRunOptions::streaming("git"))?;
     if !result.success() {
         bail!("git_diff_failed");
     }

@@ -10,7 +10,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent_exec, budget,
+    agent_exec::{self, CommandRunOptions},
+    budget,
     config::Config,
     diff_budget::{self, DiffStat},
     estimate::{self, EstimateBasis},
@@ -655,7 +656,7 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
                 "NIGHTLOOP_PROMPT_FILE".to_string(),
                 child_run_dir.join("plan-prompt.md").display().to_string(),
             )],
-            Some(&planner_prompt),
+            CommandRunOptions::streaming("agent").with_stdin(&planner_prompt),
         )?;
         fs::write(child_run_dir.join("plan-prompt.md"), &planner_prompt)?;
         fs::write(child_run_dir.join("plan.stdout"), &plan_result.stdout)?;
@@ -885,7 +886,7 @@ pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunRepor
                 .display()
                 .to_string(),
         )],
-        Some(&fix_prompt),
+        CommandRunOptions::streaming("agent").with_stdin(&fix_prompt),
     )?;
     fs::write(child_run_dir.join("review-fix-prompt.md"), &fix_prompt)?;
     fs::write(child_run_dir.join("review-fix.stdout"), &fix_result.stdout)?;
@@ -2245,7 +2246,12 @@ fn rerun_verification(
     child_run_dir: &std::path::Path,
 ) -> Result<()> {
     for (index, command) in child.verification.iter().enumerate() {
-        let result = agent_exec::run_shell_command(&command.command, workdir, &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command.command,
+            workdir,
+            &[],
+            CommandRunOptions::streaming("verify"),
+        )?;
         fs::write(
             child_run_dir.join(format!("review-verification-{:02}.stdout", index + 1)),
             &result.stdout,
@@ -2835,8 +2841,12 @@ fn execute_single_child_flow(
     ];
 
     let started = Instant::now();
-    let agent_result =
-        agent_exec::run_shell_command(&config.agent.command, &workdir, &envs, Some(prompt))?;
+    let agent_result = agent_exec::run_shell_command(
+        &config.agent.command,
+        &workdir,
+        &envs,
+        CommandRunOptions::streaming("agent").with_stdin(prompt),
+    )?;
     fs::write(child_run_dir.join("agent.stdout"), &agent_result.stdout)?;
     fs::write(child_run_dir.join("agent.stderr"), &agent_result.stderr)?;
 
@@ -2846,7 +2856,12 @@ fn execute_single_child_flow(
     }
     if failure_code.is_none() {
         for (index, command) in child.verification.iter().enumerate() {
-            let result = agent_exec::run_shell_command(&command.command, &workdir, &envs, None)?;
+            let result = agent_exec::run_shell_command(
+                &command.command,
+                &workdir,
+                &envs,
+                CommandRunOptions::streaming("verify"),
+            )?;
             fs::write(
                 child_run_dir.join(format!("verification-{:02}.stdout", index + 1)),
                 &result.stdout,
@@ -3271,7 +3286,8 @@ mod tests {
         build_report_with_workflow, extract_structured_plan, preflight_target_repo,
         progress_applying_review_feedback, progress_implementing_branch, progress_planning_child,
         progress_requesting_copilot_review, progress_waiting_for_copilot_review, repair_action,
-        PreparedCampaign, PreparedIssue, RepairKind, ReviewLoopState, StructuredPlanMode,
+        CommandRunOptions, PreparedCampaign, PreparedIssue, RepairKind, ReviewLoopState,
+        StructuredPlanMode,
     };
 
     #[test]
@@ -3525,7 +3541,7 @@ template_weight = 0.35
                 "NIGHTLOOP_PROMPT_FILE".to_string(),
                 root.join("prompt.md").display().to_string(),
             )],
-            Some("prompt body"),
+            CommandRunOptions::default().with_stdin("prompt body"),
         )
         .unwrap();
         assert!(result.success());

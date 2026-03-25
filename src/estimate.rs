@@ -245,7 +245,7 @@ fn request_ai_estimate(config: &Config, child: &ChildIssue) -> Result<AiEstimate
             ),
             ("NIGHTLOOP_CHILD_TITLE".to_string(), child.title.clone()),
         ],
-        Some(&prompt),
+        agent_exec::CommandRunOptions::streaming("agent").with_stdin(&prompt),
     )?;
     if !result.success() {
         bail!("ai_command_failed");

@@ -51,6 +51,7 @@ enum Command {
 struct Cli {
     explicit_config_path: Option<PathBuf>,
     target_name: Option<String>,
+    verbose: bool,
     command: Command,
 }
 
@@ -66,6 +67,7 @@ fn main() {
 
 fn real_main() -> Result<()> {
     let cli = parse_cli(env::args().skip(1))?;
+    nightloop::agent_exec::set_verbose_commands(cli.verbose);
     if matches!(cli.command, Command::Help) {
         print_help(None);
         return Ok(());
@@ -319,6 +321,7 @@ where
     let mut args = args.into_iter();
     let mut explicit_config_path = None;
     let mut target_name = None;
+    let mut verbose = false;
     let mut rest = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -335,6 +338,9 @@ where
                     .ok_or_else(|| anyhow!("--target requires a name"))?;
                 target_name = Some(value);
             }
+            "--verbose" => {
+                verbose = true;
+            }
             _ => rest.push(arg),
         }
     }
@@ -343,6 +349,7 @@ where
         return Ok(Cli {
             explicit_config_path,
             target_name,
+            verbose,
             command: Command::Help,
         });
     }
@@ -351,6 +358,7 @@ where
         return Ok(Cli {
             explicit_config_path,
             target_name,
+            verbose,
             command: Command::Help,
         });
     };
@@ -372,6 +380,7 @@ where
     Ok(Cli {
         explicit_config_path,
         target_name,
+        verbose,
         command,
     })
 }
@@ -642,12 +651,16 @@ fn print_help(command: Option<&str>) {
         Some("check") | Some("docs-check") => {
             "Usage: nightloop check [--target NAME]\n\
 \n\
+Global options: --verbose\n\
+\n\
 Validate required docs, templates, and prompt files.\n\
 \n\
 Compatibility alias: docs-check\n"
         }
         Some("lint") | Some("lint-issue") => {
             "Usage: nightloop lint path/to/issue.md [--target NAME]\n\
+\n\
+Global options: --verbose\n\
 \n\
 Validate a child issue markdown snapshot.\n\
 \n\
@@ -656,12 +669,16 @@ Compatibility alias: lint-issue\n"
         Some("estimate") | Some("estimate-issue") => {
             "Usage: nightloop estimate path/to/issue.md [--target NAME] [--basis template|local|hybrid|ai]\n\
 \n\
+Global options: --verbose\n\
+\n\
 Estimate model selection and runtime for a child issue.\n\
 \n\
 Compatibility alias: estimate-issue\n"
         }
         Some("init") | Some("init-target") => {
             "Usage: nightloop init NAME OWNER/REPO WORKDIR [--base-branch main] [--agent-command CMD] [--plan-command CMD] [--default-model MODEL] [--default-reasoning-effort LEVEL] [--request-copilot-review]\n\
+\n\
+Global options: --verbose\n\
 \n\
 Create targets/NAME.toml from the example template and fill common initial settings.\n\
 \n\
@@ -670,12 +687,16 @@ Compatibility alias: init-target --name NAME --repo OWNER/REPO --workdir PATH\n"
         Some("nightly") | Some("run") => {
             "Usage: nightloop nightly PARENT_ISSUE [--target NAME] --hours 2|3|4|5|6 [--dry-run]\n\
 \n\
+Global options: --verbose\n\
+\n\
 Execute or simulate the budget-based nightly campaign.\n\
 \n\
 Compatibility alias: run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n"
         }
         Some("start") | Some("review-loop") => {
             "Usage: nightloop start PARENT_ISSUE [--target NAME] [--dry-run]\n\
+\n\
+Global options: --verbose\n\
 \n\
 Plan, implement, request Copilot review, wait, and apply one fix round for the first runnable child issue.\n\
 \n\
@@ -684,15 +705,21 @@ Compatibility alias: review-loop --parent ISSUE [--dry-run]\n"
         Some("budget") => {
             "Usage: nightloop [--config PATH] [--target NAME] budget --hours 2|3|4|5|6\n\
 \n\
+Global options: --verbose\n\
+\n\
 Compute the fallback slot count for a night window.\n"
         }
         Some("record-run") => {
             "Usage: nightloop [--config PATH] [--target NAME] record-run path/to/run-record.json\n\
 \n\
+Global options: --verbose\n\
+\n\
 Append a run record to local telemetry.\n"
         }
         Some("setup-labels") => {
             "Usage: nightloop setup-labels [--target NAME]\n\
+\n\
+Global options: --verbose\n\
 \n\
 Create any missing workflow labels required by nightloop.\n"
         }
@@ -718,6 +745,7 @@ Compatibility aliases:\n\
 Global options:\n\
   --config PATH   Explicit config path; overrides --target\n\
   --target NAME   Load targets/NAME.toml from the control repo\n\
+  --verbose       Stream executed commands and live subprocess output to stderr\n\
   --help          Show this help output\n"
         }
     };
@@ -726,17 +754,15 @@ Global options:\n\
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cli, Command};
+    use super::{parse_cli, Cli, Command};
 
-    fn parse(args: &[&str]) -> Command {
-        parse_cli(args.iter().map(|arg| arg.to_string()))
-            .unwrap()
-            .command
+    fn parse(args: &[&str]) -> Cli {
+        parse_cli(args.iter().map(|arg| arg.to_string())).unwrap()
     }
 
     #[test]
     fn start_accepts_positional_parent_and_legacy_flag() {
-        match parse(&["start", "221", "--dry-run"]) {
+        match parse(&["start", "221", "--dry-run"]).command {
             Command::ReviewLoop { parent, dry_run } => {
                 assert_eq!(parent, 221);
                 assert!(dry_run);
@@ -744,7 +770,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        match parse(&["review-loop", "--parent", "222"]) {
+        match parse(&["review-loop", "--parent", "222"]).command {
             Command::ReviewLoop { parent, dry_run } => {
                 assert_eq!(parent, 222);
                 assert!(!dry_run);
@@ -755,7 +781,7 @@ mod tests {
 
     #[test]
     fn nightly_accepts_positional_parent_and_legacy_flag() {
-        match parse(&["nightly", "221", "--hours", "4"]) {
+        match parse(&["nightly", "221", "--hours", "4"]).command {
             Command::Run {
                 parent,
                 hours,
@@ -768,7 +794,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
 
-        match parse(&["run", "--parent", "222", "--hours", "2", "--dry-run"]) {
+        match parse(&["run", "--parent", "222", "--hours", "2", "--dry-run"]).command {
             Command::Run {
                 parent,
                 hours,
@@ -790,7 +816,9 @@ mod tests {
             "UTAGEDA/canaria",
             "/tmp/canaria",
             "--request-copilot-review",
-        ]) {
+        ])
+        .command
+        {
             Command::InitTarget {
                 name,
                 repo,
@@ -806,6 +834,19 @@ mod tests {
                 assert_eq!(agent_command, "codex exec --full-auto");
                 assert_eq!(plan_command, "codex exec --full-auto");
                 assert!(request_copilot_review);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verbose_is_parsed_as_global_option() {
+        let cli = parse(&["--verbose", "start", "221"]);
+        assert!(cli.verbose);
+        match cli.command {
+            Command::ReviewLoop { parent, dry_run } => {
+                assert_eq!(parent, 221);
+                assert!(!dry_run);
             }
             other => panic!("unexpected command: {other:?}"),
         }

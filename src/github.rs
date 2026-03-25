@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::{
-    agent_exec,
+    agent_exec::{self, CommandRunOptions},
     config::{Config, Labels},
     models::{IssueSnapshot, IssueState},
 };
@@ -48,7 +48,7 @@ impl<'a> GitHubClient<'a> {
             "gh auth status",
             &self.config.working_directory(),
             &[],
-            None,
+            CommandRunOptions::streaming("gh"),
         )?;
         if result.success() {
             return Ok(());
@@ -62,8 +62,12 @@ impl<'a> GitHubClient<'a> {
             issue_number,
             self.config.repo_slug()
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_issue_view_failed");
         }
@@ -85,8 +89,12 @@ impl<'a> GitHubClient<'a> {
             self.config.repo_slug(),
             label_args
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_label_update_failed");
         }
@@ -108,8 +116,12 @@ impl<'a> GitHubClient<'a> {
             self.config.repo_slug(),
             label_args
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_label_update_failed");
         }
@@ -123,8 +135,12 @@ impl<'a> GitHubClient<'a> {
             self.config.repo_slug(),
             shell_quote(body)
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_issue_comment_failed");
         }
@@ -146,8 +162,12 @@ impl<'a> GitHubClient<'a> {
             shell_quote(title),
             shell_quote(body)
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_pr_create_failed");
         }
@@ -162,8 +182,12 @@ impl<'a> GitHubClient<'a> {
     pub fn request_pr_review(&self, pr_target: &str, reviewer: &str) -> Result<()> {
         let command =
             build_request_pr_review_command(&self.config.repo_slug(), pr_target, reviewer);
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_pr_review_request_failed");
         }
@@ -175,8 +199,12 @@ impl<'a> GitHubClient<'a> {
             "gh label list --repo {} --json name",
             self.config.repo_slug()
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_label_list_failed");
         }
@@ -186,8 +214,12 @@ impl<'a> GitHubClient<'a> {
     pub fn create_label(&self, name: &str, color: &str, description: &str) -> Result<()> {
         let command =
             build_create_label_command(&self.config.repo_slug(), name, color, description);
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_label_create_failed");
         }
@@ -240,8 +272,12 @@ impl<'a> GitHubClient<'a> {
             self.config.repo_slug(),
             pr_number
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_pr_view_failed");
         }
@@ -285,7 +321,7 @@ impl<'a> GitHubClient<'a> {
             &reviews_command,
             &self.config.working_directory(),
             &[],
-            None,
+            CommandRunOptions::streaming("gh"),
         )?;
         if !reviews.success() {
             bail!("gh_pr_review_poll_failed");
@@ -294,7 +330,7 @@ impl<'a> GitHubClient<'a> {
             &comments_command,
             &self.config.working_directory(),
             &[],
-            None,
+            CommandRunOptions::streaming("gh"),
         )?;
         if !comments.success() {
             bail!("gh_pr_comments_fetch_failed");
@@ -352,8 +388,12 @@ impl<'a> GitHubClient<'a> {
             self.config.repo_slug(),
             pr_number
         );
-        let result =
-            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        let result = agent_exec::run_shell_command(
+            &command,
+            &self.config.working_directory(),
+            &[],
+            CommandRunOptions::streaming("gh"),
+        )?;
         if !result.success() {
             bail!("gh_pr_view_failed");
         }

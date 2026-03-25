@@ -339,6 +339,32 @@ fn lint_estimate_record_and_docs_commands_work_end_to_end() {
 }
 
 #[test]
+fn verbose_streams_agent_command_to_stderr_without_polluting_stdout() {
+    let root = temp_root("verbose-estimate");
+    let config = write_config(&root);
+    let issue_path = write_issue(&root);
+
+    let (code, stdout, stderr) = run_cli(
+        &root,
+        &[
+            "--config",
+            &config.display().to_string(),
+            "--verbose",
+            "estimate",
+            &issue_path.display().to_string(),
+            "--basis",
+            "ai",
+        ],
+    );
+
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stdout.contains("ai_estimated_minutes=65"));
+    assert!(!stdout.contains("running[agent]:"));
+    assert!(stderr.contains("running[agent]:"));
+    assert!(stderr.contains("\"estimated_minutes\":65"));
+}
+
+#[test]
 fn lint_and_docs_use_target_repo_root_when_control_and_target_differ() {
     let root = temp_root("dual-root");
     let control = root.join("control");
@@ -494,6 +520,7 @@ fn config_flag_overrides_named_target_and_help_mentions_target_workflow() {
     );
     assert!(help_stdout.contains("--agent-command CMD"));
     assert!(help_stdout.contains("--target NAME"));
+    assert!(help_stdout.contains("--verbose"));
 }
 
 #[test]
