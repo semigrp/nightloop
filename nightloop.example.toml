@@ -1,0 +1,80 @@
+[github]
+owner = "your-org"
+repo = "your-repo"
+base_branch = "main"
+
+[agent]
+command = "codex exec"
+plan_command = "codex exec"
+working_directory = "."
+default_model = "gpt-5.4"
+default_reasoning_effort = "medium"
+
+[[agent.model_profiles]]
+name = "fast"
+model = "gpt-5.4-mini"
+reasoning_effort = "medium"
+intended_for = "lighter coding tasks, codebase exploration, supporting docs"
+max_size = "S"
+runtime_multiplier = 0.85
+
+[[agent.model_profiles]]
+name = "balanced"
+model = "gpt-5.4"
+reasoning_effort = "medium"
+intended_for = "default profile for most child issues"
+max_size = "M"
+runtime_multiplier = 1.0
+
+[[agent.model_profiles]]
+name = "deep"
+model = "gpt-5.4"
+reasoning_effort = "high"
+intended_for = "heavier planning, architecture-sensitive changes, larger tasks"
+max_size = "L"
+runtime_multiplier = 1.2
+
+[loop]
+default_hours = 4
+min_hours = 2
+max_hours = 6
+fallback_cycle_minutes = 40
+fixed_overhead_minutes = 20
+stop_on_failure = true
+one_branch_per_child = true
+one_pr_per_child = true
+
+[diff]
+min_lines = 50
+max_lines = 1000
+allow_doc_only_below_min = true
+
+[labels]
+campaign = "campaign"
+night_run = "night-run"
+ready = "agent:ready"
+running = "agent:running"
+review = "agent:review"
+blocked = "agent:blocked"
+done = "agent:done"
+
+[docs]
+required_paths = ["README.md", "AGENTS.md", "docs/"]
+
+[estimation]
+default_basis = "hybrid"
+allow_ai_assist = true
+template_minutes_xs = 35
+template_minutes_s = 50
+template_minutes_m = 80
+template_minutes_l = 120
+dependency_penalty_minutes = 5
+docs_penalty_readme = 5
+docs_penalty_user_facing = 10
+docs_penalty_architecture = 15
+
+[telemetry]
+history_path = ".nightloop/history.jsonl"
+min_samples_for_local = 3
+local_weight = 0.65
+template_weight = 0.35

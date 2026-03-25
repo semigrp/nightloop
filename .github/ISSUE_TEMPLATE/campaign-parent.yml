@@ -1,0 +1,60 @@
+name: Campaign parent
+description: Parent Issue for a night-run campaign
+labels: [campaign]
+title: "[Campaign] "
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: Why does this campaign exist?
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should be true when this campaign is complete?
+    validations:
+      required: true
+  - type: textarea
+    id: source_of_truth
+    attributes:
+      label: Source of truth
+      description: Link the PRD, spec, plan, and any ADRs.
+    validations:
+      required: true
+  - type: dropdown
+    id: execution_mode
+    attributes:
+      label: Execution mode
+      options:
+        - sequential
+    validations:
+      required: true
+  - type: dropdown
+    id: stop_on_failure
+    attributes:
+      label: Stop on failure
+      options:
+        - true
+        - false
+    validations:
+      required: true
+  - type: textarea
+    id: child_issues
+    attributes:
+      label: Ordered child Issues
+      description: One per line, with dependency notes if needed.
+      placeholder: |
+        - [ ] #222 first child
+        - [ ] #223 depends on #222
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Completion condition
+      description: Define what counts as done for the whole campaign.
+    validations:
+      required: true

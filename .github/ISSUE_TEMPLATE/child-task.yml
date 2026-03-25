@@ -1,0 +1,137 @@
+name: Child task
+description: Runnable child Issue for a night-run campaign
+labels: [night-run, "agent:ready"]
+title: "[Task] "
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is included?
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: What must not be changed in this task?
+    validations:
+      required: true
+  - type: textarea
+    id: source_of_truth
+    attributes:
+      label: Source of truth
+      description: Exact docs and files to follow.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Implementation constraints
+      description: Architecture, safety, migration, or UX constraints.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Build, test, lint, screenshots, fixtures.
+    validations:
+      required: true
+  - type: input
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Comma-separated issue numbers, if any.
+      placeholder: "222, 223"
+    validations:
+      required: false
+  - type: dropdown
+    id: target_change_size
+    attributes:
+      label: Target change size
+      options:
+        - XS (50-120)
+        - S (120-250)
+        - M (250-500)
+        - L (500-1000)
+    validations:
+      required: true
+  - type: dropdown
+    id: documentation_impact
+    attributes:
+      label: Documentation impact
+      options:
+        - none
+        - readme
+        - user-facing-docs
+        - architecture-docs
+    validations:
+      required: true
+  - type: dropdown
+    id: suggested_model_profile
+    attributes:
+      label: Suggested model profile
+      description: Keep this coarse. Use exact model override only when necessary.
+      options:
+        - fast
+        - balanced
+        - deep
+    validations:
+      required: true
+  - type: input
+    id: suggested_model_override
+    attributes:
+      label: Suggested model override
+      description: Optional exact model name, for example gpt-5.4-mini or gpt-5.4.
+      placeholder: "gpt-5.4"
+    validations:
+      required: false
+  - type: input
+    id: estimated_execution_time
+    attributes:
+      label: Estimated execution time
+      description: Rough local runtime in minutes for one child Issue cycle.
+      placeholder: "65"
+    validations:
+      required: true
+  - type: dropdown
+    id: estimation_basis
+    attributes:
+      label: Estimation basis
+      options:
+        - template
+        - local
+        - hybrid
+        - ai
+        - manual
+    validations:
+      required: true
+  - type: dropdown
+    id: estimation_confidence
+    attributes:
+      label: Estimation confidence
+      options:
+        - low
+        - medium
+        - high
+    validations:
+      required: true
