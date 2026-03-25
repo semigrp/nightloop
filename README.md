@@ -18,6 +18,7 @@ The core stays provider-agnostic. `nightloop` shells out to local tools instead 
 
 This repository now implements the v0 CLI surface:
 
+- `nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /abs/path/to/repo`
 - `nightloop budget --hours 2|3|4|5|6`
 - `nightloop lint-issue path/to/issue.md`
 - `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
@@ -43,27 +44,38 @@ For real `run` execution:
 
 ## Quickstart
 
-1. Copy [`nightloop.example.toml`](/Users/semigrp/dev/nightloop/nightloop.example.toml) to `nightloop.toml` and update the repo and agent settings.
+1. Create a named target once from the control repo:
+
+```sh
+nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /Users/semigrp/dev/canaria
+```
+
 2. Ensure `gh` is authenticated for the target repository.
 3. Author parent and child Issues using the templates in [`.github/ISSUE_TEMPLATE/`](/Users/semigrp/dev/nightloop/.github/ISSUE_TEMPLATE).
 4. Check issue quality locally:
 
 ```sh
-nightloop lint-issue path/to/child-issue.md
-nightloop docs-check
-nightloop estimate-issue path/to/child-issue.md --basis hybrid
+nightloop docs-check --target canaria
+nightloop lint-issue --target canaria path/to/child-issue.md
+nightloop estimate-issue --target canaria path/to/child-issue.md --basis hybrid
 ```
 
 5. Simulate a campaign:
 
 ```sh
-nightloop run --parent 221 --hours 4 --dry-run
+nightloop run --target canaria --parent 221 --hours 4 --dry-run
 ```
 
 6. Execute the campaign for real:
 
 ```sh
-nightloop run --parent 221 --hours 4
+nightloop run --target canaria --parent 221 --hours 4
+```
+
+Advanced or one-off usage can still bypass the target registry:
+
+```sh
+nightloop --config /abs/path/to/nightloop.toml run --parent 221 --hours 4
 ```
 
 ## Control Repo Mode
@@ -73,6 +85,7 @@ nightloop run --parent 221 --hours 4
 - `github.owner/repo` tells `gh` which repository to read and write.
 - `agent.working_directory` is the canonical target repo root for all local git operations, agent execution, repo-relative source-of-truth checks, docs checks, telemetry, and default run artifacts.
 - bundled files that ship with `nightloop`, such as `prompts/` and `docs/templates/`, are resolved from the directory containing `nightloop.toml`
+- named targets live under `targets/<name>.toml` in the control repo
 
 Recommended layout:
 
@@ -94,6 +107,13 @@ plan_command = "codex exec"
 working_directory = "/absolute/path/to/other-repo"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
+```
+
+Normal invocation from the control repo:
+
+```sh
+nightloop docs-check --target canaria
+nightloop run --target canaria --parent 221 --hours 4 --dry-run
 ```
 
 ## Issue Contracts

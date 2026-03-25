@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -115,10 +115,11 @@ pub struct TelemetryConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let control_root = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let control_root = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::load_with_control_root(path, control_root)
+    }
+
+    pub fn load_with_control_root(path: &Path, control_root: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config from {}", path.display()))?;
         let mut cfg = toml::from_str::<Self>(&raw)
@@ -186,6 +187,69 @@ impl Config {
     }
 }
 
+pub fn resolve_config_path(
+    cwd: &Path,
+    explicit_config: Option<&Path>,
+    target_name: Option<&str>,
+) -> Result<PathBuf> {
+    if let Some(path) = explicit_config {
+        return Ok(resolve_invocation_path(cwd, path));
+    }
+
+    if let Some(target) = target_name {
+        let path = cwd.join("targets").join(format!("{target}.toml"));
+        if !path.exists() {
+            bail!("target_config_not_found");
+        }
+        return Ok(path);
+    }
+
+    Ok(cwd.join("nightloop.toml"))
+}
+
+pub fn resolve_control_root(cwd: &Path, explicit_config: Option<&Path>) -> PathBuf {
+    match explicit_config {
+        Some(path) => {
+            let anchor = resolve_invocation_path(cwd, path);
+            normalize_path(anchor.parent().unwrap_or(cwd))
+        }
+        None => normalize_path(cwd),
+    }
+}
+
+pub fn render_named_target_config(
+    template: &str,
+    repo_owner: &str,
+    repo_name: &str,
+    workdir: &Path,
+    base_branch: &str,
+) -> String {
+    template
+        .replacen(
+            r#"owner = "your-org""#,
+            &format!(r#"owner = "{}""#, escape_toml_string(repo_owner)),
+            1,
+        )
+        .replacen(
+            r#"repo = "your-repo""#,
+            &format!(r#"repo = "{}""#, escape_toml_string(repo_name)),
+            1,
+        )
+        .replacen(
+            r#"base_branch = "main""#,
+            &format!(r#"base_branch = "{}""#, escape_toml_string(base_branch)),
+            1,
+        )
+        .replacen(
+            r#"working_directory = ".""#,
+            &format!(
+                r#"working_directory = "{}""#,
+                escape_toml_string(&workdir.display().to_string())
+            ),
+            1,
+        )
+}
+
 fn default_copilot_reviewer() -> String {
     "github-copilot[bot]".to_string()
 }
@@ -198,11 +262,23 @@ fn normalize_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn resolve_invocation_path(cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
     use std::{env, fs};
 
-    use super::{normalize_path, Config};
+    use super::{normalize_path, render_named_target_config, resolve_config_path, Config};
 
     #[test]
     fn resolves_control_target_run_and_telemetry_paths() {
@@ -299,5 +375,55 @@ template_weight = 0.35
             config.resolve_target_path(std::path::Path::new("README.md")),
             config.target_repo_root().join("README.md")
         );
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_explicit_then_target_then_default() {
+        let root = env::temp_dir().join(format!("nightloop-config-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("targets")).unwrap();
+        fs::write(root.join("nightloop.toml"), "").unwrap();
+        fs::write(root.join("targets/canaria.toml"), "").unwrap();
+        fs::write(root.join("custom.toml"), "").unwrap();
+
+        assert_eq!(
+            resolve_config_path(
+                &root,
+                Some(std::path::Path::new("custom.toml")),
+                Some("canaria")
+            )
+            .unwrap(),
+            root.join("custom.toml")
+        );
+        assert_eq!(
+            resolve_config_path(&root, None, Some("canaria")).unwrap(),
+            root.join("targets/canaria.toml")
+        );
+        assert_eq!(
+            resolve_config_path(&root, None, None).unwrap(),
+            root.join("nightloop.toml")
+        );
+        assert_eq!(
+            resolve_config_path(&root, None, Some("missing"))
+                .unwrap_err()
+                .to_string(),
+            "target_config_not_found"
+        );
+    }
+
+    #[test]
+    fn render_named_target_config_reuses_template_shape() {
+        let rendered = render_named_target_config(
+            include_str!("../nightloop.example.toml"),
+            "UTAGEDA",
+            "canaria",
+            std::path::Path::new("/tmp/canaria"),
+            "develop",
+        );
+        assert!(rendered.contains(r#"owner = "UTAGEDA""#));
+        assert!(rendered.contains(r#"repo = "canaria""#));
+        assert!(rendered.contains(r#"base_branch = "develop""#));
+        assert!(rendered.contains(r#"working_directory = "/tmp/canaria""#));
+        assert!(rendered.contains(r#"request_copilot_review = false"#));
     }
 }

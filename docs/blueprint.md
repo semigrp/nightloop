@@ -30,6 +30,7 @@ An optional GitHub-specific post-PR hook may request review from `github-copilot
 
 Supported commands:
 
+- `nightloop init-target --name canaria --repo UTAGEDA/canaria --workdir /abs/path/to/repo`
 - `nightloop budget --hours 2|3|4|5|6`
 - `nightloop lint-issue path/to/issue.md`
 - `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
@@ -39,11 +40,24 @@ Supported commands:
 
 All command output is compact `key=value`.
 
+Named target resolution order is:
+
+1. explicit `--config PATH`
+2. `--target NAME` -> `targets/NAME.toml`
+3. fallback `./nightloop.toml`
+
 `run` reporting may include:
 
 - `target_repo_root=...`
 - `run_root=...`
 - `target_repo_match=true|false|unknown`
+
+`init-target` writes `targets/<name>.toml` from the shipped example template and fills:
+
+- `github.owner`
+- `github.repo`
+- `github.base_branch`
+- `agent.working_directory`
 
 ## 3. Issue Contracts
 

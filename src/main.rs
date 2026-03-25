@@ -2,7 +2,9 @@ use std::{env, path::PathBuf, process};
 
 use anyhow::{anyhow, bail, Result};
 use nightloop::{
-    budget, config::Config, docs_support, estimate, issue_lint, reporting, runner, telemetry,
+    budget,
+    config::{self, Config},
+    docs_support, estimate, issue_lint, reporting, runner, telemetry,
 };
 
 #[derive(Debug)]
@@ -21,6 +23,12 @@ enum Command {
         path: PathBuf,
     },
     DocsCheck,
+    InitTarget {
+        name: String,
+        repo: String,
+        workdir: PathBuf,
+        base_branch: String,
+    },
     Run {
         parent: u64,
         hours: u32,
@@ -31,7 +39,8 @@ enum Command {
 
 #[derive(Debug)]
 struct Cli {
-    config_path: PathBuf,
+    explicit_config_path: Option<PathBuf>,
+    target_name: Option<String>,
     command: Command,
 }
 
@@ -51,11 +60,50 @@ fn real_main() -> Result<()> {
         print_help(None);
         return Ok(());
     }
-
-    let config = Config::load(&cli.config_path)?;
+    let cwd = env::current_dir()?;
+    let config = if matches!(cli.command, Command::InitTarget { .. }) {
+        None
+    } else {
+        Some(load_config_for_cli(&cwd, &cli)?)
+    };
 
     match cli.command {
+        Command::InitTarget {
+            name,
+            repo,
+            workdir,
+            base_branch,
+        } => {
+            let control_root =
+                config::resolve_control_root(&cwd, cli.explicit_config_path.as_deref());
+            let (owner, repo_name) = repo
+                .split_once('/')
+                .ok_or_else(|| anyhow!("--repo must be OWNER/REPO"))?;
+            let template_path = control_root.join("nightloop.example.toml");
+            let template = std::fs::read_to_string(&template_path)
+                .map_err(|_| anyhow!("failed to read template from {}", template_path.display()))?;
+            let rendered = config::render_named_target_config(
+                &template,
+                owner,
+                repo_name,
+                &workdir,
+                &base_branch,
+            );
+            let target_dir = control_root.join("targets");
+            std::fs::create_dir_all(&target_dir)?;
+            let target_path = target_dir.join(format!("{name}.toml"));
+            if target_path.exists() {
+                bail!("target_config_exists");
+            }
+            std::fs::write(&target_path, rendered)?;
+            reporting::print_pairs(&[
+                ("ok", "true".to_string()),
+                ("target", name),
+                ("config_path", target_path.display().to_string()),
+            ]);
+        }
         Command::Budget { hours } => {
+            let config = config.as_ref().unwrap();
             let report = budget::budget_report(
                 hours,
                 config.loop_cfg.fallback_cycle_minutes,
@@ -78,6 +126,7 @@ fn real_main() -> Result<()> {
             ]);
         }
         Command::LintIssue { path } => {
+            let config = config.as_ref().unwrap();
             let report = issue_lint::lint_markdown_issue(&config, &path)?;
             reporting::print_pairs(&[
                 ("valid", report.valid.to_string()),
@@ -96,6 +145,7 @@ fn real_main() -> Result<()> {
             }
         }
         Command::EstimateIssue { path, basis } => {
+            let config = config.as_ref().unwrap();
             let lint = issue_lint::lint_markdown_issue(&config, &path)?;
             if !lint.valid {
                 reporting::print_pairs(&[
@@ -141,6 +191,7 @@ fn real_main() -> Result<()> {
             }
         }
         Command::RecordRun { path } => {
+            let config = config.as_ref().unwrap();
             let record = telemetry::read_run_record(&path)?;
             let history_path = config.telemetry_history_path();
             telemetry::append_run_record(&history_path, &record)?;
@@ -150,6 +201,7 @@ fn real_main() -> Result<()> {
             ]);
         }
         Command::DocsCheck => {
+            let config = config.as_ref().unwrap();
             let report = docs_support::check_docs(&config)?;
             reporting::print_pairs(&[
                 ("ok", report.ok.to_string()),
@@ -170,6 +222,7 @@ fn real_main() -> Result<()> {
             hours,
             dry_run,
         } => {
+            let config = config.as_ref().unwrap();
             let report = if dry_run {
                 runner::dry_run(&config, parent, hours)?
             } else {
@@ -186,53 +239,77 @@ fn real_main() -> Result<()> {
     Ok(())
 }
 
+fn load_config_for_cli(cwd: &std::path::Path, cli: &Cli) -> Result<Config> {
+    let config_path = config::resolve_config_path(
+        cwd,
+        cli.explicit_config_path.as_deref(),
+        cli.target_name.as_deref(),
+    )?;
+    if cli.explicit_config_path.is_none() && cli.target_name.is_some() {
+        Config::load_with_control_root(&config_path, cwd)
+    } else {
+        Config::load(&config_path)
+    }
+}
+
 fn parse_cli<I>(args: I) -> Result<Cli>
 where
     I: IntoIterator<Item = String>,
 {
-    let mut args = args.into_iter().peekable();
-    let mut config_path = PathBuf::from("nightloop.toml");
+    let mut args = args.into_iter();
+    let mut explicit_config_path = None;
+    let mut target_name = None;
+    let mut rest = Vec::new();
 
-    loop {
-        match args.peek().map(String::as_str) {
-            Some("--config") => {
-                args.next();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
                 let value = args
                     .next()
                     .ok_or_else(|| anyhow!("--config requires a path"))?;
-                config_path = PathBuf::from(value);
+                explicit_config_path = Some(PathBuf::from(value));
             }
-            Some("--help") | Some("-h") => {
-                args.next();
-                return Ok(Cli {
-                    config_path,
-                    command: Command::Help,
-                });
+            "--target" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--target requires a name"))?;
+                target_name = Some(value);
             }
-            _ => break,
+            _ => rest.push(arg),
         }
     }
 
-    let Some(command_name) = args.next() else {
+    if rest.len() == 1 && matches!(rest.first().map(String::as_str), Some("--help" | "-h")) {
         return Ok(Cli {
-            config_path,
+            explicit_config_path,
+            target_name,
+            command: Command::Help,
+        });
+    }
+
+    let Some(command_name) = rest.first() else {
+        return Ok(Cli {
+            explicit_config_path,
+            target_name,
             command: Command::Help,
         });
     };
 
     let command = match command_name.as_str() {
-        "budget" => parse_budget(args.collect())?,
-        "lint-issue" => parse_lint_issue(args.collect())?,
-        "estimate-issue" => parse_estimate_issue(args.collect())?,
-        "record-run" => parse_record_run(args.collect())?,
-        "docs-check" => parse_docs_check(args.collect())?,
-        "run" => parse_run(args.collect())?,
+        "budget" => parse_budget(rest[1..].to_vec())?,
+        "lint-issue" => parse_lint_issue(rest[1..].to_vec())?,
+        "estimate-issue" => parse_estimate_issue(rest[1..].to_vec())?,
+        "record-run" => parse_record_run(rest[1..].to_vec())?,
+        "docs-check" => parse_docs_check(rest[1..].to_vec())?,
+        "init-target" => parse_init_target(rest[1..].to_vec())?,
+        "run" => parse_run(rest[1..].to_vec())?,
         "help" => Command::Help,
         other => bail!("unknown command: {other}"),
     };
 
     Ok(Cli {
-        config_path,
+        explicit_config_path,
+        target_name,
         command,
     })
 }
@@ -322,6 +399,52 @@ fn parse_docs_check(args: Vec<String>) -> Result<Command> {
     Ok(Command::DocsCheck)
 }
 
+fn parse_init_target(args: Vec<String>) -> Result<Command> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_help(Some("init-target"));
+        process::exit(0);
+    }
+    let mut name = None;
+    let mut repo = None;
+    let mut workdir = None;
+    let mut base_branch = "main".to_string();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--name" => {
+                name = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--name requires a value"))?,
+                );
+            }
+            "--repo" => {
+                repo = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--repo requires a value"))?,
+                );
+            }
+            "--workdir" => {
+                workdir = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--workdir requires a value"))?,
+                ));
+            }
+            "--base-branch" => {
+                base_branch = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--base-branch requires a value"))?;
+            }
+            other => bail!("unexpected argument for init-target: {other}"),
+        }
+    }
+    Ok(Command::InitTarget {
+        name: name.ok_or_else(|| anyhow!("init-target requires --name"))?,
+        repo: repo.ok_or_else(|| anyhow!("init-target requires --repo"))?,
+        workdir: workdir.ok_or_else(|| anyhow!("init-target requires --workdir"))?,
+        base_branch,
+    })
+}
+
 fn parse_run(args: Vec<String>) -> Result<Command> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help(Some("run"));
@@ -359,32 +482,37 @@ fn parse_run(args: Vec<String>) -> Result<Command> {
 fn print_help(command: Option<&str>) {
     let text = match command {
         Some("budget") => {
-            "Usage: nightloop [--config PATH] budget --hours 2|3|4|5|6\n\
+            "Usage: nightloop [--config PATH] [--target NAME] budget --hours 2|3|4|5|6\n\
 \n\
 Compute the fallback slot count for a night window.\n"
         }
         Some("lint-issue") => {
-            "Usage: nightloop [--config PATH] lint-issue path/to/issue.md\n\
+            "Usage: nightloop [--config PATH] [--target NAME] lint-issue path/to/issue.md\n\
 \n\
 Validate a child issue markdown snapshot.\n"
         }
         Some("estimate-issue") => {
-            "Usage: nightloop [--config PATH] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
+            "Usage: nightloop [--config PATH] [--target NAME] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
 \n\
 Estimate model selection and runtime for a child issue.\n"
         }
         Some("record-run") => {
-            "Usage: nightloop [--config PATH] record-run path/to/run-record.json\n\
+            "Usage: nightloop [--config PATH] [--target NAME] record-run path/to/run-record.json\n\
 \n\
 Append a run record to local telemetry.\n"
         }
         Some("docs-check") => {
-            "Usage: nightloop [--config PATH] docs-check\n\
+            "Usage: nightloop [--config PATH] [--target NAME] docs-check\n\
 \n\
 Validate required docs, templates, and prompt files.\n"
         }
+        Some("init-target") => {
+            "Usage: nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH [--base-branch main]\n\
+\n\
+Create targets/NAME.toml from the example template.\n"
+        }
         Some("run") => {
-            "Usage: nightloop [--config PATH] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
+            "Usage: nightloop [--config PATH] [--target NAME] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
 \n\
 Execute or simulate a parent issue campaign.\n"
         }
@@ -394,15 +522,17 @@ Execute or simulate a parent issue campaign.\n"
 Issue-first nightly runner for coding agents.\n\
 \n\
 Usage:\n\
+  nightloop init-target --name NAME --repo OWNER/REPO --workdir PATH\n\
+  nightloop [--target NAME] docs-check\n\
+  nightloop [--target NAME] lint-issue path/to/issue.md\n\
+  nightloop [--target NAME] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
+  nightloop [--target NAME] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
   nightloop [--config PATH] budget --hours 2|3|4|5|6\n\
-  nightloop [--config PATH] lint-issue path/to/issue.md\n\
-  nightloop [--config PATH] estimate-issue path/to/issue.md [--basis template|local|hybrid|ai]\n\
   nightloop [--config PATH] record-run path/to/run-record.json\n\
-  nightloop [--config PATH] docs-check\n\
-  nightloop [--config PATH] run --parent ISSUE --hours 2|3|4|5|6 [--dry-run]\n\
 \n\
 Global options:\n\
-  --config PATH   Path to nightloop.toml (default: nightloop.toml)\n\
+  --config PATH   Explicit config path; overrides --target\n\
+  --target NAME   Load targets/NAME.toml from the control repo\n\
   --help          Show this help output\n"
         }
     };
