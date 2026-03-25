@@ -35,16 +35,17 @@ pub fn check_docs(config: &Config) -> Result<DocsReport> {
     let mut missing_paths = Vec::new();
 
     for path in &config.docs.required_paths {
-        if !path.exists() {
+        let resolved = config.resolve_target_path(path);
+        if !resolved.exists() {
             missing_paths.push(MissingPath {
                 kind: "required_path".to_string(),
-                path: path.clone(),
+                path: resolved,
             });
         }
     }
 
     for path in REQUIRED_TEMPLATE_FILES {
-        let path = PathBuf::from(path);
+        let path = config.resolve_control_path(&PathBuf::from(path));
         if !path.exists() {
             missing_paths.push(MissingPath {
                 kind: "template".to_string(),
@@ -54,7 +55,7 @@ pub fn check_docs(config: &Config) -> Result<DocsReport> {
     }
 
     for path in REQUIRED_PROMPT_FILES {
-        let path = PathBuf::from(path);
+        let path = config.resolve_control_path(&PathBuf::from(path));
         if !path.exists() {
             missing_paths.push(MissingPath {
                 kind: "prompt".to_string(),
@@ -71,7 +72,7 @@ pub fn check_docs(config: &Config) -> Result<DocsReport> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, path::PathBuf};
+    use std::{env, fs};
 
     use crate::config::Config;
 
@@ -108,7 +109,7 @@ copilot_reviewer = "github-copilot[bot]"
 [agent]
 command = "echo agent"
 plan_command = "echo planner"
-working_directory = "."
+working_directory = "target"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
 
@@ -129,6 +130,7 @@ fixed_overhead_minutes = 20
 stop_on_failure = true
 one_branch_per_child = true
 one_pr_per_child = true
+run_root = ".nightloop/runs"
 
 [diff]
 min_lines = 50
@@ -167,15 +169,15 @@ template_weight = 0.35
 "#,
         )
         .unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        fs::write(root.join("target/README.md"), "ok").unwrap();
+        fs::write(root.join("target/AGENTS.md"), "ok").unwrap();
         let config = Config::load(&config_path).unwrap();
-        let cwd = env::current_dir().unwrap();
-        env::set_current_dir(&root).unwrap();
         let report = check_docs(&config).unwrap();
-        env::set_current_dir(cwd).unwrap();
         assert!(!report.ok);
         assert!(report
             .missing_paths
             .iter()
-            .any(|item| item.path == PathBuf::from("prompts/estimate_issue.md")));
+            .any(|item| item.path.ends_with("prompts/estimate_issue.md")));
     }
 }

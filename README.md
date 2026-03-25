@@ -66,6 +66,36 @@ nightloop run --parent 221 --hours 4 --dry-run
 nightloop run --parent 221 --hours 4
 ```
 
+## Control Repo Mode
+
+`nightloop` can run from a control checkout while operating on a different target repository.
+
+- `github.owner/repo` tells `gh` which repository to read and write.
+- `agent.working_directory` is the canonical target repo root for all local git operations, agent execution, repo-relative source-of-truth checks, docs checks, telemetry, and default run artifacts.
+- bundled files that ship with `nightloop`, such as `prompts/` and `docs/templates/`, are resolved from the directory containing `nightloop.toml`
+
+Recommended layout:
+
+- keep the `nightloop` source checkout as the control repo
+- point `agent.working_directory` at the target repo checkout
+- keep `loop.run_root` and `[telemetry].history_path` relative so they land under the target repo by default
+
+Example:
+
+```toml
+[github]
+owner = "other-org"
+repo = "other-repo"
+base_branch = "main"
+
+[agent]
+command = "codex exec"
+plan_command = "codex exec"
+working_directory = "/absolute/path/to/other-repo"
+default_model = "gpt-5.4"
+default_reasoning_effort = "medium"
+```
+
 ## Issue Contracts
 
 ### Parent Issues
@@ -114,6 +144,8 @@ Allowed forms:
 - `http://` or `https://` URLs
 
 `lint-issue` validates local paths exist. URL validation is syntax-only.
+
+Repo-relative paths are resolved against `agent.working_directory`, not the current shell directory.
 
 ### Verification
 
@@ -208,13 +240,15 @@ When `--basis ai` is requested:
 
 Dry-run makes no GitHub writes and no git changes.
 
+Before planning, dry-run also checks that the target repo exists, is a git worktree, and that its `origin` remote matches `github.owner/repo` when `origin` is configured. A mismatch fails with `target_repo_mismatch`. If no `origin` exists, the run continues with `target_repo_match=unknown`.
+
 ### Real Run
 
 `nightloop run`:
 
 1. requires valid `gh` auth and a clean worktree
 2. fetches and prepares the campaign exactly as dry-run does
-3. creates `.nightloop/runs/<timestamp>-parent-<id>/child-<id>/`
+3. creates `<loop.run_root>/<timestamp>-parent-<id>/child-<id>/`
 4. snapshots issue metadata and writes an agent prompt file
 5. moves the child Issue from `agent:ready` to `agent:running`
 6. creates a stacked branch for the child
@@ -279,6 +313,8 @@ If the diff falls below either minimum, it is accepted only when the child Issue
 ## Telemetry
 
 `record-run` appends JSON objects to the configured JSONL history path. The same schema is used by the real runner.
+
+Relative telemetry and run-artifact paths are resolved from `agent.working_directory`, so control-repo operation still keeps execution state with the target repo.
 
 Each record includes:
 

@@ -177,7 +177,17 @@ pub fn lint_child_issue(config: &Config, snapshot: &IssueSnapshot) -> LintReport
             Ok(refs) => {
                 for source in refs {
                     match source.kind {
-                        SourceRefKind::RepoRelative { path } | SourceRefKind::Absolute { path } => {
+                        SourceRefKind::RepoRelative { path } => {
+                            let resolved = config.resolve_target_path(&path);
+                            if !resolved.exists() {
+                                findings.push(finding(
+                                    "source_path_missing",
+                                    Some("source of truth".to_string()),
+                                    format!("missing source-of-truth path {}", resolved.display()),
+                                ));
+                            }
+                        }
+                        SourceRefKind::Absolute { path } => {
                             if !path.exists() {
                                 findings.push(finding(
                                     "source_path_missing",
@@ -245,7 +255,7 @@ copilot_reviewer = "github-copilot[bot]"
 [agent]
 command = "echo agent"
 plan_command = "echo planner"
-working_directory = "."
+working_directory = "target"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
 
@@ -266,6 +276,7 @@ fixed_overhead_minutes = 20
 stop_on_failure = true
 one_branch_per_child = true
 one_pr_per_child = true
+run_root = ".nightloop/runs"
 
 [diff]
 min_lines = 50
@@ -314,15 +325,13 @@ template_weight = 0.35
         let root = env::temp_dir().join(format!("nightloop-lint-valid-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let readme_path = root.join("README.md");
+        fs::create_dir_all(root.join("target")).unwrap();
+        let readme_path = root.join("target/README.md");
         fs::write(&readme_path, "ok").unwrap();
         let issue_path = root.join("issue.md");
         fs::write(
             &issue_path,
-            format!(
-                "## Background\none\n## Goal\ntwo\n## Scope\ndocs-only\n## Out of scope\nthree\n## Source of truth\n{}\n## Acceptance criteria\nfour\n## Verification\ncmd: cargo test\n## Dependencies\nnone\n## Target change size\nXS\n## Documentation impact\nreadme\n## Suggested model profile\nbalanced\n## Estimated execution time\n30\n## Estimation basis\ntemplate\n## Estimation confidence\nmedium\n",
-                readme_path.display()
-            ),
+            "## Background\none\n## Goal\ntwo\n## Scope\ndocs-only\n## Out of scope\nthree\n## Source of truth\nREADME.md\n## Acceptance criteria\nfour\n## Verification\ncmd: cargo test\n## Dependencies\nnone\n## Target change size\nXS\n## Documentation impact\nreadme\n## Suggested model profile\nbalanced\n## Estimated execution time\n30\n## Estimation basis\ntemplate\n## Estimation confidence\nmedium\n",
         )
         .unwrap();
         let report = lint_markdown_issue(&test_config(&root), &issue_path).unwrap();

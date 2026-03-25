@@ -38,8 +38,12 @@ fn write_common_files(root: &Path) {
 }
 
 fn write_config(root: &Path) -> PathBuf {
-    write_common_files(root);
-    let config_path = root.join("nightloop.toml");
+    write_config_for_target(root, root)
+}
+
+fn write_config_for_target(control_root: &Path, target_root: &Path) -> PathBuf {
+    write_common_files(control_root);
+    let config_path = control_root.join("nightloop.toml");
     fs::write(
         &config_path,
         format!(
@@ -74,6 +78,7 @@ fixed_overhead_minutes = 20
 stop_on_failure = true
 one_branch_per_child = true
 one_pr_per_child = true
+run_root = ".nightloop/runs"
 
 [diff]
 min_lines = 50
@@ -110,8 +115,8 @@ min_samples_for_local = 1
 local_weight = 0.65
 template_weight = 0.35
 "#,
-            root.display(),
-            root.join(".nightloop/history.jsonl").display()
+            target_root.display(),
+            target_root.join(".nightloop/history.jsonl").display()
         ),
     )
     .unwrap();
@@ -240,6 +245,44 @@ fn lint_estimate_record_and_docs_commands_work_end_to_end() {
 
     let (docs_code, docs_stdout, docs_stderr) = run_cli(
         &root,
+        &["--config", &config.display().to_string(), "docs-check"],
+    );
+    assert_eq!(docs_code, 0, "stderr={docs_stderr}");
+    assert!(docs_stdout.contains("ok=true"));
+}
+
+#[test]
+fn lint_and_docs_use_target_repo_root_when_control_and_target_differ() {
+    let root = temp_root("dual-root");
+    let control = root.join("control");
+    let target = root.join("target");
+    fs::create_dir_all(&control).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("README.md"), "target readme").unwrap();
+    fs::write(target.join("AGENTS.md"), "target agents").unwrap();
+
+    let config = write_config_for_target(&control, &target);
+    let issue_path = control.join("issue.md");
+    fs::write(
+        &issue_path,
+        "## Background\none\n## Goal\ntwo\n## Scope\ndocs-only\n## Out of scope\nthree\n## Source of truth\nREADME.md\n## Acceptance criteria\nfour\n## Verification\ncmd: cargo test\n## Dependencies\nnone\n## Target change size\nXS\n## Documentation impact\nreadme\n## Suggested model profile\nbalanced\n## Estimated execution time\n30\n## Estimation basis\ntemplate\n## Estimation confidence\nmedium\n",
+    )
+    .unwrap();
+
+    let (lint_code, lint_stdout, lint_stderr) = run_cli(
+        &control,
+        &[
+            "--config",
+            &config.display().to_string(),
+            "lint-issue",
+            &issue_path.display().to_string(),
+        ],
+    );
+    assert_eq!(lint_code, 0, "stderr={lint_stderr}");
+    assert!(lint_stdout.contains("valid=true"));
+
+    let (docs_code, docs_stdout, docs_stderr) = run_cli(
+        &control,
         &["--config", &config.display().to_string(), "docs-check"],
     );
     assert_eq!(docs_code, 0, "stderr={docs_stderr}");

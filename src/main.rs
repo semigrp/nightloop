@@ -142,8 +142,8 @@ fn real_main() -> Result<()> {
         }
         Command::RecordRun { path } => {
             let record = telemetry::read_run_record(&path)?;
-            let history_path = config.telemetry.history_path.as_path();
-            telemetry::append_run_record(history_path, &record)?;
+            let history_path = config.telemetry_history_path();
+            telemetry::append_run_record(&history_path, &record)?;
             reporting::print_pairs(&[
                 ("ok", "true".to_string()),
                 ("history_path", history_path.display().to_string()),

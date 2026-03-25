@@ -17,6 +17,10 @@ pub struct Config {
     pub docs: DocsConfig,
     pub estimation: EstimationConfig,
     pub telemetry: TelemetryConfig,
+    #[serde(skip)]
+    control_root: PathBuf,
+    #[serde(skip)]
+    target_repo_root: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +64,8 @@ pub struct LoopConfig {
     pub stop_on_failure: bool,
     pub one_branch_per_child: bool,
     pub one_pr_per_child: bool,
+    #[serde(default = "default_run_root")]
+    pub run_root: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,10 +115,21 @@ pub struct TelemetryConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
+        let control_root = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config from {}", path.display()))?;
-        let cfg = toml::from_str::<Self>(&raw)
+        let mut cfg = toml::from_str::<Self>(&raw)
             .with_context(|| format!("failed to parse TOML config from {}", path.display()))?;
+        cfg.control_root = normalize_path(&control_root);
+        cfg.target_repo_root =
+            normalize_path(&if Path::new(&cfg.agent.working_directory).is_absolute() {
+                PathBuf::from(&cfg.agent.working_directory)
+            } else {
+                cfg.control_root.join(&cfg.agent.working_directory)
+            });
         Ok(cfg)
     }
 
@@ -132,11 +149,155 @@ impl Config {
         format!("{}/{}", self.github.owner, self.github.repo)
     }
 
+    pub fn control_root(&self) -> &Path {
+        &self.control_root
+    }
+
+    pub fn target_repo_root(&self) -> &Path {
+        &self.target_repo_root
+    }
+
     pub fn working_directory(&self) -> PathBuf {
-        PathBuf::from(&self.agent.working_directory)
+        self.target_repo_root.clone()
+    }
+
+    pub fn run_root(&self) -> PathBuf {
+        self.resolve_target_path(&self.loop_cfg.run_root)
+    }
+
+    pub fn telemetry_history_path(&self) -> PathBuf {
+        self.resolve_target_path(&self.telemetry.history_path)
+    }
+
+    pub fn resolve_target_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            normalize_path(path)
+        } else {
+            normalize_path(&self.target_repo_root.join(path))
+        }
+    }
+
+    pub fn resolve_control_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            normalize_path(path)
+        } else {
+            normalize_path(&self.control_root.join(path))
+        }
     }
 }
 
 fn default_copilot_reviewer() -> String {
     "github-copilot[bot]".to_string()
+}
+
+fn default_run_root() -> PathBuf {
+    PathBuf::from(".nightloop/runs")
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, fs};
+
+    use super::{normalize_path, Config};
+
+    #[test]
+    fn resolves_control_target_run_and_telemetry_paths() {
+        let root = env::temp_dir().join(format!("nightloop-config-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let control = root.join("control");
+        let target = control.join("repos/project");
+        fs::create_dir_all(&target).unwrap();
+        let config_path = control.join("nightloop.toml");
+        fs::write(
+            &config_path,
+            r#"[github]
+owner = "o"
+repo = "r"
+base_branch = "main"
+
+[agent]
+command = "echo agent"
+plan_command = "echo planner"
+working_directory = "repos/project"
+default_model = "gpt-5.4"
+default_reasoning_effort = "medium"
+
+[[agent.model_profiles]]
+name = "balanced"
+model = "gpt-5.4"
+reasoning_effort = "medium"
+intended_for = "default"
+max_size = "M"
+runtime_multiplier = 1.0
+
+[loop]
+default_hours = 4
+min_hours = 2
+max_hours = 6
+fallback_cycle_minutes = 40
+fixed_overhead_minutes = 20
+stop_on_failure = true
+one_branch_per_child = true
+one_pr_per_child = true
+run_root = ".runs"
+
+[diff]
+min_lines = 50
+max_lines = 1000
+allow_doc_only_below_min = true
+
+[labels]
+campaign = "campaign"
+night_run = "night-run"
+ready = "agent:ready"
+running = "agent:running"
+review = "agent:review"
+blocked = "agent:blocked"
+done = "agent:done"
+
+[docs]
+required_paths = ["README.md"]
+
+[estimation]
+default_basis = "hybrid"
+allow_ai_assist = true
+template_minutes_xs = 35
+template_minutes_s = 50
+template_minutes_m = 80
+template_minutes_l = 120
+dependency_penalty_minutes = 5
+docs_penalty_readme = 5
+docs_penalty_user_facing = 10
+docs_penalty_architecture = 15
+
+[telemetry]
+history_path = ".nightloop/history.jsonl"
+min_samples_for_local = 1
+local_weight = 0.65
+template_weight = 0.35
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(config.control_root(), normalize_path(&control));
+        assert_eq!(config.target_repo_root(), normalize_path(&target));
+        assert_eq!(config.run_root(), config.target_repo_root().join(".runs"));
+        assert_eq!(
+            config.telemetry_history_path(),
+            config.target_repo_root().join(".nightloop/history.jsonl")
+        );
+        assert_eq!(
+            config.resolve_control_path(std::path::Path::new("prompts/estimate_issue.md")),
+            config.control_root().join("prompts/estimate_issue.md")
+        );
+        assert_eq!(
+            config.resolve_target_path(std::path::Path::new("README.md")),
+            config.target_repo_root().join("README.md")
+        );
+    }
 }

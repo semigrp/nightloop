@@ -18,6 +18,23 @@ pub fn ensure_clean_worktree(workdir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn ensure_git_worktree(workdir: &Path) -> Result<()> {
+    let result =
+        agent_exec::run_shell_command("git rev-parse --is-inside-work-tree", workdir, &[], None)?;
+    if !result.success() || result.stdout.trim() != "true" {
+        bail!("target_repo_not_git_repo");
+    }
+    Ok(())
+}
+
+pub fn origin_repo_slug(workdir: &Path) -> Result<Option<String>> {
+    let result = agent_exec::run_shell_command("git remote get-url origin", workdir, &[], None)?;
+    if !result.success() {
+        return Ok(None);
+    }
+    Ok(parse_origin_repo_slug(result.stdout.trim()))
+}
+
 pub fn switch_branch(workdir: &Path, branch: &str) -> Result<()> {
     let result = agent_exec::run_shell_command(
         &format!("git switch {}", shell_quote(branch)),
@@ -107,4 +124,40 @@ pub fn diff_against(workdir: &Path, base_sha: &str) -> Result<DiffStat> {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+pub fn parse_origin_repo_slug(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        return Some(rest.trim_end_matches(".git").to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_origin_repo_slug;
+
+    #[test]
+    fn parses_origin_repo_slug_from_common_remote_urls() {
+        assert_eq!(
+            parse_origin_repo_slug("git@github.com:semigrp/nightloop.git"),
+            Some("semigrp/nightloop".to_string())
+        );
+        assert_eq!(
+            parse_origin_repo_slug("https://github.com/semigrp/nightloop.git"),
+            Some("semigrp/nightloop".to_string())
+        );
+        assert_eq!(
+            parse_origin_repo_slug("ssh://git@github.com/semigrp/nightloop.git"),
+            Some("semigrp/nightloop".to_string())
+        );
+        assert_eq!(parse_origin_repo_slug("file:///tmp/repo"), None);
+    }
 }

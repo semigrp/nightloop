@@ -57,7 +57,7 @@ pub fn estimate_child_issue(
         profile.runtime_multiplier,
     );
     let local_stats = telemetry::load_stats(
-        &config.telemetry.history_path,
+        &config.telemetry_history_path(),
         &profile.name,
         &child.target_size,
         &child.docs_impact,
@@ -200,7 +200,8 @@ fn recommend_window_hours(
 }
 
 fn request_ai_estimate(config: &Config, child: &ChildIssue) -> Result<AiEstimate> {
-    let template_path = config.working_directory().join("prompts/estimate_issue.md");
+    let template_path =
+        config.resolve_control_path(std::path::Path::new("prompts/estimate_issue.md"));
     let template = fs::read_to_string(&template_path)
         .with_context(|| format!("failed to read {}", template_path.display()))?;
     let prompt = format!(
@@ -428,7 +429,7 @@ template_weight = 0.35
         assert_eq!(report.estimated_minutes, 90);
 
         telemetry::append_run_record(
-            &config.telemetry.history_path,
+            &config.telemetry_history_path(),
             &RunRecord {
                 run_id: "1".to_string(),
                 parent_issue: 10,
@@ -454,7 +455,7 @@ template_weight = 0.35
         )
         .unwrap();
         telemetry::append_run_record(
-            &config.telemetry.history_path,
+            &config.telemetry_history_path(),
             &RunRecord {
                 actual_minutes: 80,
                 ..RunRecord {

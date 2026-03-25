@@ -20,6 +20,12 @@ The runner shells out to:
 
 An optional GitHub-specific post-PR hook may request review from `github-copilot[bot]` after draft PR creation.
 
+`nightloop` may run from a separate control checkout. In that mode:
+
+- the config file location is the control root
+- bundled `prompts/` and `docs/templates/` are read from the control root
+- `agent.working_directory` is the canonical target repo root for local validation, git operations, agent execution, telemetry, and run artifacts
+
 ## 2. Public v0 Surface
 
 Supported commands:
@@ -32,6 +38,12 @@ Supported commands:
 - `nightloop run --parent 221 --hours 4 [--dry-run]`
 
 All command output is compact `key=value`.
+
+`run` reporting may include:
+
+- `target_repo_root=...`
+- `run_root=...`
+- `target_repo_match=true|false|unknown`
 
 ## 3. Issue Contracts
 
@@ -84,6 +96,8 @@ One reference per non-empty line. Allowed forms:
 - `http://` or `https://` URLs
 
 Local paths are validated by `lint-issue`. URLs are syntax-only.
+
+Repo-relative paths are resolved against the target repo root, not the process `cwd`.
 
 ### Verification
 
@@ -160,6 +174,14 @@ Dry-run fetches Issues, parses them, lints them, computes estimates, applies eli
 
 Dry-run makes no GitHub writes and no git changes.
 
+Preflight also checks:
+
+- the target repo exists
+- the target repo is a git worktree
+- if `origin` exists, it matches `github.owner/repo`
+
+A remote mismatch is a hard failure with `target_repo_mismatch`. Missing `origin` is allowed and reported as `target_repo_match=unknown`.
+
 ### Real run
 
 Real execution:
@@ -167,7 +189,7 @@ Real execution:
 1. checks `gh` auth
 2. checks for a clean worktree
 3. prepares the same campaign plan as dry-run
-4. creates `.nightloop/runs/<timestamp>-parent-<id>/child-<id>/`
+4. creates `<loop.run_root>/<timestamp>-parent-<id>/child-<id>/`
 5. snapshots issue metadata and writes the prompt file
 6. adds `agent:running`
 7. creates the child branch
@@ -226,6 +248,8 @@ If the diff falls below either minimum, it is accepted only with the explicit `d
 ## 10. Telemetry
 
 Telemetry is JSONL, not a database.
+
+Relative telemetry paths and the default `loop.run_root = ".nightloop/runs"` are both resolved from the target repo root.
 
 Each line records:
 

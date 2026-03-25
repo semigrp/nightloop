@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::PathBuf,
     time::Instant,
 };
 
@@ -61,19 +60,36 @@ struct PreparedCampaign {
     estimated_total_minutes: u32,
     remaining_minutes: u32,
     hours: u32,
+    target_repo_match: String,
+    target_repo_root: String,
+    run_root: String,
 }
 
 pub fn dry_run(config: &Config, parent_issue_number: u64, hours: u32) -> Result<RunReport> {
     let github = GitHubClient::new(config);
     github.check_auth()?;
-    let prepared = prepare_campaign(config, &github, parent_issue_number, hours)?;
+    let target_repo_match = preflight_target_repo(config)?;
+    let prepared = prepare_campaign(
+        config,
+        &github,
+        parent_issue_number,
+        hours,
+        target_repo_match,
+    )?;
     Ok(build_report(&prepared, true, true, 0))
 }
 
 pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Result<RunReport> {
     let github = GitHubClient::new(config);
     github.check_auth()?;
-    let mut prepared = prepare_campaign(config, &github, parent_issue_number, hours)?;
+    let target_repo_match = preflight_target_repo(config)?;
+    let mut prepared = prepare_campaign(
+        config,
+        &github,
+        parent_issue_number,
+        hours,
+        target_repo_match,
+    )?;
     let workdir = config.working_directory();
     git_ops::ensure_clean_worktree(&workdir)?;
     git_ops::switch_branch(&workdir, &config.github.base_branch)?;
@@ -83,7 +99,7 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         parent_issue_number
     );
-    let run_root = PathBuf::from(".nightloop").join("runs").join(&run_id);
+    let run_root = config.run_root().join(&run_id);
     fs::create_dir_all(&run_root)?;
 
     let mut completed_in_run = HashSet::new();
@@ -301,7 +317,7 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         )?;
 
         telemetry::append_run_record(
-            &config.telemetry.history_path,
+            &config.telemetry_history_path(),
             &RunRecord {
                 run_id: run_id.clone(),
                 parent_issue: prepared.parent.number,
@@ -349,6 +365,7 @@ fn prepare_campaign(
     github: &GitHubClient<'_>,
     parent_issue_number: u64,
     hours: u32,
+    target_repo_match: String,
 ) -> Result<PreparedCampaign> {
     let available_minutes = budget::available_minutes(
         hours,
@@ -459,6 +476,9 @@ fn prepare_campaign(
         estimated_total_minutes,
         remaining_minutes,
         hours,
+        target_repo_match,
+        target_repo_root: config.target_repo_root().display().to_string(),
+        run_root: config.run_root().display().to_string(),
     })
 }
 
@@ -534,7 +554,7 @@ fn finalize_failure(
     )?;
 
     telemetry::append_run_record(
-        &config.telemetry.history_path,
+        &config.telemetry_history_path(),
         &RunRecord {
             run_id: run_id.to_string(),
             parent_issue,
@@ -776,6 +796,15 @@ fn build_report(
             "actual_total_minutes".to_string(),
             actual_total_minutes.to_string(),
         ),
+        (
+            "target_repo_root".to_string(),
+            prepared.target_repo_root.clone(),
+        ),
+        ("run_root".to_string(), prepared.run_root.clone()),
+        (
+            "target_repo_match".to_string(),
+            prepared.target_repo_match.clone(),
+        ),
     ]];
 
     for item in &prepared.issues {
@@ -829,6 +858,19 @@ fn join_for_comment(values: &[String]) -> String {
     }
 }
 
+fn preflight_target_repo(config: &Config) -> Result<String> {
+    let workdir = config.working_directory();
+    if !workdir.exists() {
+        anyhow::bail!("target_repo_missing");
+    }
+    git_ops::ensure_git_worktree(&workdir)?;
+    match git_ops::origin_repo_slug(&workdir)? {
+        Some(slug) if slug == config.repo_slug() => Ok("true".to_string()),
+        Some(_) => anyhow::bail!("target_repo_mismatch"),
+        None => Ok("unknown".to_string()),
+    }
+}
+
 fn build_copilot_review_comment_line(status: Option<&str>) -> String {
     match status {
         Some("requested") => "- copilot review requested: true".to_string(),
@@ -841,7 +883,11 @@ fn build_copilot_review_comment_line(status: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_copilot_review_comment_line;
+    use std::{env, fs, process::Command};
+
+    use crate::config::Config;
+
+    use super::{build_copilot_review_comment_line, preflight_target_repo};
 
     #[test]
     fn copilot_review_comment_line_matches_status() {
@@ -852,5 +898,152 @@ mod tests {
         assert!(build_copilot_review_comment_line(Some("failed"))
             .contains("copilot_review_request_failed"));
         assert!(build_copilot_review_comment_line(Some("skipped")).is_empty());
+    }
+
+    fn config_for_target(
+        control: &std::path::Path,
+        target: &std::path::Path,
+        slug: &str,
+    ) -> Config {
+        let (owner, repo) = slug.split_once('/').unwrap();
+        let config_path = control.join("nightloop.toml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"[github]
+owner = "{owner}"
+repo = "{repo}"
+base_branch = "main"
+
+[agent]
+command = "echo agent"
+plan_command = "echo planner"
+working_directory = "{}"
+default_model = "gpt-5.4"
+default_reasoning_effort = "medium"
+
+[[agent.model_profiles]]
+name = "balanced"
+model = "gpt-5.4"
+reasoning_effort = "medium"
+intended_for = "default"
+max_size = "M"
+runtime_multiplier = 1.0
+
+[loop]
+default_hours = 4
+min_hours = 2
+max_hours = 6
+fallback_cycle_minutes = 40
+fixed_overhead_minutes = 20
+stop_on_failure = true
+one_branch_per_child = true
+one_pr_per_child = true
+run_root = ".nightloop/runs"
+
+[diff]
+min_lines = 50
+max_lines = 1000
+allow_doc_only_below_min = true
+
+[labels]
+campaign = "campaign"
+night_run = "night-run"
+ready = "agent:ready"
+running = "agent:running"
+review = "agent:review"
+blocked = "agent:blocked"
+done = "agent:done"
+
+[docs]
+required_paths = []
+
+[estimation]
+default_basis = "hybrid"
+allow_ai_assist = true
+template_minutes_xs = 35
+template_minutes_s = 50
+template_minutes_m = 80
+template_minutes_l = 120
+dependency_penalty_minutes = 5
+docs_penalty_readme = 5
+docs_penalty_user_facing = 10
+docs_penalty_architecture = 15
+
+[telemetry]
+history_path = ".nightloop/history.jsonl"
+min_samples_for_local = 1
+local_weight = 0.65
+template_weight = 0.35
+"#,
+                target.display()
+            ),
+        )
+        .unwrap();
+        Config::load(&config_path).unwrap()
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn preflight_target_repo_accepts_matching_remote_and_unknown_without_origin() {
+        let root = env::temp_dir().join(format!("nightloop-preflight-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let control = root.join("control");
+        let target_match = root.join("target-match");
+        let target_unknown = root.join("target-unknown");
+        fs::create_dir_all(&control).unwrap();
+        fs::create_dir_all(&target_match).unwrap();
+        fs::create_dir_all(&target_unknown).unwrap();
+
+        git(&target_match, &["init"]);
+        git(
+            &target_match,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:semigrp/nightloop.git",
+            ],
+        );
+
+        git(&target_unknown, &["init"]);
+
+        let matching = config_for_target(&control, &target_match, "semigrp/nightloop");
+        assert_eq!(preflight_target_repo(&matching).unwrap(), "true");
+
+        let unknown = config_for_target(&control, &target_unknown, "semigrp/nightloop");
+        assert_eq!(preflight_target_repo(&unknown).unwrap(), "unknown");
+    }
+
+    #[test]
+    fn preflight_target_repo_rejects_mismatched_remote() {
+        let root = env::temp_dir().join(format!(
+            "nightloop-preflight-mismatch-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let control = root.join("control");
+        let target = root.join("target");
+        fs::create_dir_all(&control).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        git(&target, &["init"]);
+        git(
+            &target,
+            &["remote", "add", "origin", "git@github.com:other/repo.git"],
+        );
+
+        let config = config_for_target(&control, &target, "semigrp/nightloop");
+        assert_eq!(
+            preflight_target_repo(&config).unwrap_err().to_string(),
+            "target_repo_mismatch"
+        );
     }
 }
