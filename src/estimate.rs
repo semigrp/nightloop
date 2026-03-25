@@ -313,6 +313,8 @@ mod tests {
 owner = "o"
 repo = "r"
 base_branch = "main"
+request_copilot_review = false
+copilot_reviewer = "github-copilot[bot]"
 
 [agent]
 command = "echo agent"
@@ -443,6 +445,7 @@ template_weight = 0.35
                 files_touched: 2,
                 success: true,
                 status: "success".to_string(),
+                copilot_review: None,
                 branch: "b".to_string(),
                 pr_base: "main".to_string(),
                 pr_url: None,
@@ -470,6 +473,7 @@ template_weight = 0.35
                     files_touched: 2,
                     success: true,
                     status: "success".to_string(),
+                    copilot_review: None,
                     branch: "c".to_string(),
                     pr_base: "main".to_string(),
                     pr_url: None,

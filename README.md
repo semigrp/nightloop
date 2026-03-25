@@ -39,6 +39,7 @@ For real `run` execution:
 - `gh auth status` must succeed
 - the git worktree must be clean before the run starts
 - the configured base branch must exist locally
+- if `github.request_copilot_review = true`, the repo/org must support Copilot review requests and the authenticated user must be allowed to request reviewers
 
 ## Quickstart
 
@@ -223,6 +224,7 @@ Dry-run makes no GitHub writes and no git changes.
 10. on success:
    - commits changes
    - creates a draft PR
+   - optionally requests review from `github-copilot[bot]`
    - removes `agent:running`
    - adds `agent:review`
    - comments a concise success summary on the child Issue
@@ -245,6 +247,23 @@ Each later successful child branch in the same run is created from the current H
 - later PR base = previous successful child branch
 
 This is the v0 reviewability strategy. `nightloop` does not implement merge queues or multi-agent orchestration.
+
+### Optional Copilot Review Request
+
+When enabled in `nightloop.toml`:
+
+- `github.request_copilot_review = true`
+- `github.copilot_reviewer = "github-copilot[bot]"`
+
+`nightloop run` requests review immediately after each successful draft PR is created.
+
+Behavior:
+
+- success is reported as `copilot_review=requested`
+- if the request fails, the PR still succeeds and the run continues
+- failure is reported as `copilot_review=failed` and `copilot_review_request_failed`
+
+This review request is GitHub-specific and intentionally optional.
 
 ## Diff Budget Enforcement
 

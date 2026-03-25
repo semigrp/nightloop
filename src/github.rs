@@ -131,6 +131,17 @@ impl<'a> GitHubClient<'a> {
             .ok_or_else(|| anyhow!("gh_pr_create_missing_url"))?;
         Ok(url.to_string())
     }
+
+    pub fn request_pr_review(&self, pr_target: &str, reviewer: &str) -> Result<()> {
+        let command =
+            build_request_pr_review_command(&self.config.repo_slug(), pr_target, reviewer);
+        let result =
+            agent_exec::run_shell_command(&command, &self.config.working_directory(), &[], None)?;
+        if !result.success() {
+            bail!("gh_pr_review_request_failed");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,18 +171,40 @@ pub fn parse_issue_json(raw: &str) -> Result<IssueSnapshot> {
     })
 }
 
+pub fn build_request_pr_review_command(repo_slug: &str, pr_target: &str, reviewer: &str) -> String {
+    format!(
+        "gh pr edit {} --repo {} --add-reviewer {}",
+        shell_quote(pr_target),
+        repo_slug,
+        shell_quote(reviewer)
+    )
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_issue_json;
+    use super::{build_request_pr_review_command, parse_issue_json};
 
     #[test]
     fn parses_issue_fixture_json() {
         let issue = parse_issue_json(include_str!("../tests/fixtures/github_issue.json")).unwrap();
         assert_eq!(issue.number, 221);
         assert!(issue.has_label("campaign"));
+    }
+
+    #[test]
+    fn builds_review_request_command() {
+        let command = build_request_pr_review_command(
+            "o/r",
+            "https://github.com/o/r/pull/1",
+            "github-copilot[bot]",
+        );
+        assert_eq!(
+            command,
+            "gh pr edit 'https://github.com/o/r/pull/1' --repo o/r --add-reviewer 'github-copilot[bot]'"
+        );
     }
 }

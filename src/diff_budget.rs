@@ -109,6 +109,8 @@ mod tests {
 owner = "o"
 repo = "r"
 base_branch = "main"
+request_copilot_review = false
+copilot_reviewer = "github-copilot[bot]"
 
 [agent]
 command = "echo agent"

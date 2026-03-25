@@ -123,6 +123,7 @@ mod tests {
             files_touched: 3,
             success: true,
             status: "success".to_string(),
+            copilot_review: None,
             branch: "nightloop/10-11".to_string(),
             pr_base: "main".to_string(),
             pr_url: None,

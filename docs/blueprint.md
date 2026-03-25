@@ -18,6 +18,8 @@ The runner shells out to:
 - `git` for branch and diff operations
 - configured shell commands for agent execution and optional AI estimation
 
+An optional GitHub-specific post-PR hook may request review from `github-copilot[bot]` after draft PR creation.
+
 ## 2. Public v0 Surface
 
 Supported commands:
@@ -175,6 +177,7 @@ Real execution:
 11. on success:
    - commit
    - create draft PR
+   - optionally request Copilot review
    - remove `agent:running`
    - add `agent:review`
    - comment on the child Issue
@@ -197,6 +200,17 @@ Stacking is the v0 reviewability mechanism:
 - later draft PR base = previous successful child branch
 
 This supports dependency chains without introducing a merge queue or orchestration system.
+
+## 8.1 Optional Copilot Review Request
+
+If enabled by config, the runner requests review from `github-copilot[bot]` immediately after each successful draft PR is created.
+
+Policy:
+
+- disabled by default
+- failure to request review is non-blocking
+- the child remains successful and stays in `agent:review`
+- the warning is surfaced in machine-readable output and summary comments
 
 ## 9. Diff Budget Policy
 

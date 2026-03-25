@@ -50,6 +50,7 @@ struct PreparedIssue {
     actual_minutes: Option<u32>,
     branch: Option<String>,
     pr_url: Option<String>,
+    copilot_review: Option<String>,
 }
 
 struct PreparedCampaign {
@@ -273,13 +274,29 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         )?;
         item.pr_url = Some(pr_url.clone());
 
+        if config.github.request_copilot_review {
+            match github.request_pr_review(&pr_url, &config.github.copilot_reviewer) {
+                Ok(()) => item.copilot_review = Some("requested".to_string()),
+                Err(_) => {
+                    item.copilot_review = Some("failed".to_string());
+                    item.reasons
+                        .push("copilot_review_request_failed".to_string());
+                }
+            }
+        }
+
         github.remove_labels(child.number, &[&config.labels.running])?;
         github.add_labels(child.number, &[&config.labels.review])?;
         github.comment_issue(
             child.number,
             &format!(
-                "nightloop success\n\n- branch: `{}`\n- draft PR: {}\n- estimated minutes: {}\n- actual minutes: {}\n- changed lines: {}",
-                branch_name, pr_url, estimate.estimated_minutes, actual_minutes, diff_stat.changed_lines
+                "nightloop success\n\n- branch: `{}`\n- draft PR: {}\n- estimated minutes: {}\n- actual minutes: {}\n- changed lines: {}\n{}",
+                branch_name,
+                pr_url,
+                estimate.estimated_minutes,
+                actual_minutes,
+                diff_stat.changed_lines,
+                build_copilot_review_comment_line(item.copilot_review.as_deref())
             ),
         )?;
 
@@ -301,6 +318,7 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
                 files_touched: diff_stat.files_touched,
                 success: true,
                 status: "success".to_string(),
+                copilot_review: item.copilot_review.clone(),
                 branch: branch_name.clone(),
                 pr_base: pr_base.clone(),
                 pr_url: Some(pr_url.clone()),
@@ -373,6 +391,11 @@ fn prepare_campaign(
             actual_minutes: None,
             branch: None,
             pr_url: None,
+            copilot_review: if config.github.request_copilot_review {
+                Some("skipped".to_string())
+            } else {
+                None
+            },
         };
 
         if !lint.valid {
@@ -528,6 +551,7 @@ fn finalize_failure(
             files_touched: diff_stat.files_touched,
             success: false,
             status: failure_code.to_string(),
+            copilot_review: None,
             branch: branch_name.to_string(),
             pr_base: pr_base.to_string(),
             pr_url: None,
@@ -660,18 +684,44 @@ fn build_parent_summary(
                 .map(|url| format!("#{} -> {}", item.snapshot.number, url))
         })
         .collect::<Vec<_>>();
-
-    format!(
-        "nightloop parent summary\n\n- Hours: {}\n- Selected children: {}\n- Completed children: {}\n- Blocked children: {}\n- Skipped children: {}\n- PR chain: {}\n- Estimated minutes: {}\n- Actual minutes: {}",
+    let copilot_reviews = prepared
+        .issues
+        .iter()
+        .filter_map(|item| {
+            item.copilot_review
+                .as_ref()
+                .and_then(|status| match status.as_str() {
+                    "requested" | "failed" => {
+                        Some(format!("#{} ({})", item.snapshot.number, status))
+                    }
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut summary = format!(
+        "nightloop parent summary\n\n- Hours: {}\n- Selected children: {}\n- Completed children: {}\n- Blocked children: {}\n- Skipped children: {}\n- PR chain: {}",
         hours,
         join_for_comment(&selected),
         join_for_comment(&completed),
         join_for_comment(&blocked),
         join_for_comment(&skipped),
         join_for_comment(&pr_chain),
-        estimated_total_minutes,
-        actual_total_minutes
-    )
+    );
+    if prepared
+        .issues
+        .iter()
+        .any(|item| item.copilot_review.is_some())
+    {
+        summary.push_str(&format!(
+            "\n- Copilot reviews: {}",
+            join_for_comment(&copilot_reviews)
+        ));
+    }
+    summary.push_str(&format!(
+        "\n- Estimated minutes: {}\n- Actual minutes: {}",
+        estimated_total_minutes, actual_total_minutes
+    ));
+    summary
 }
 
 fn build_report(
@@ -762,6 +812,9 @@ fn build_report(
         if let Some(pr_url) = &item.pr_url {
             line.push(("pr_url".to_string(), pr_url.clone()));
         }
+        if let Some(copilot_review) = &item.copilot_review {
+            line.push(("copilot_review".to_string(), copilot_review.clone()));
+        }
         lines.push(line);
     }
 
@@ -773,5 +826,31 @@ fn join_for_comment(values: &[String]) -> String {
         "none".to_string()
     } else {
         values.join(", ")
+    }
+}
+
+fn build_copilot_review_comment_line(status: Option<&str>) -> String {
+    match status {
+        Some("requested") => "- copilot review requested: true".to_string(),
+        Some("failed") => {
+            "- copilot review requested: failed (`copilot_review_request_failed`)".to_string()
+        }
+        _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_copilot_review_comment_line;
+
+    #[test]
+    fn copilot_review_comment_line_matches_status() {
+        assert_eq!(
+            build_copilot_review_comment_line(Some("requested")),
+            "- copilot review requested: true"
+        );
+        assert!(build_copilot_review_comment_line(Some("failed"))
+            .contains("copilot_review_request_failed"));
+        assert!(build_copilot_review_comment_line(Some("skipped")).is_empty());
     }
 }

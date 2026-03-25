@@ -47,6 +47,8 @@ fn write_config(root: &Path) -> PathBuf {
 owner = "o"
 repo = "r"
 base_branch = "main"
+request_copilot_review = false
+copilot_reviewer = "github-copilot[bot]"
 
 [agent]
 command = "echo agent"
@@ -214,6 +216,7 @@ fn lint_estimate_record_and_docs_commands_work_end_to_end() {
   "files_touched": 4,
   "success": true,
   "status": "success",
+  "copilot_review": null,
   "branch": "nightloop/10-11",
   "pr_base": "main",
   "pr_url": null,

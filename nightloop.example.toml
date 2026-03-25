@@ -4,6 +4,8 @@
 owner = "your-org"
 repo = "your-repo"
 base_branch = "main"
+request_copilot_review = false
+copilot_reviewer = "github-copilot[bot]"
 
 [agent]
 # Executed for real child-issue implementation runs.

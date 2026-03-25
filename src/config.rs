@@ -24,6 +24,10 @@ pub struct GitHub {
     pub owner: String,
     pub repo: String,
     pub base_branch: String,
+    #[serde(default)]
+    pub request_copilot_review: bool,
+    #[serde(default = "default_copilot_reviewer")]
+    pub copilot_reviewer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,4 +135,8 @@ impl Config {
     pub fn working_directory(&self) -> PathBuf {
         PathBuf::from(&self.agent.working_directory)
     }
+}
+
+fn default_copilot_reviewer() -> String {
+    "github-copilot[bot]".to_string()
 }

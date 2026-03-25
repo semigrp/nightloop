@@ -313,6 +313,7 @@ pub struct RunRecord {
     pub files_touched: u32,
     pub success: bool,
     pub status: String,
+    pub copilot_review: Option<String>,
     pub branch: String,
     pub pr_base: String,
     pub pr_url: Option<String>,
