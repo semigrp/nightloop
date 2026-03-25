@@ -113,11 +113,22 @@ impl Config {
     }
 
     pub fn model_profile(&self, name: &str) -> Option<&ModelProfile> {
-        self.agent.model_profiles.iter().find(|p| p.name.eq_ignore_ascii_case(name))
+        self.agent
+            .model_profiles
+            .iter()
+            .find(|profile| profile.name.eq_ignore_ascii_case(name))
     }
 
     pub fn default_profile(&self) -> Option<&ModelProfile> {
         self.model_profile("balanced")
             .or_else(|| self.agent.model_profiles.first())
+    }
+
+    pub fn repo_slug(&self) -> String {
+        format!("{}/{}", self.github.owner, self.github.repo)
+    }
+
+    pub fn working_directory(&self) -> PathBuf {
+        PathBuf::from(&self.agent.working_directory)
     }
 }

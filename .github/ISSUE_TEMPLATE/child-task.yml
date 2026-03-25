@@ -19,7 +19,7 @@ body:
     id: scope
     attributes:
       label: Scope
-      description: What is included?
+      description: What is included? Use an exact line `docs-only` or `config-only` only when the task is intentionally allowed below the normal diff minimum.
     validations:
       required: true
   - type: textarea
@@ -33,7 +33,7 @@ body:
     id: source_of_truth
     attributes:
       label: Source of truth
-      description: Exact docs and files to follow.
+      description: One reference per line. Use repo-relative paths, absolute local paths, or URLs.
     validations:
       required: true
   - type: textarea
@@ -53,7 +53,7 @@ body:
     id: verification
     attributes:
       label: Verification
-      description: Build, test, lint, screenshots, fixtures.
+      description: Use either a fenced sh/bash/shell block or `cmd:` lines only.
     validations:
       required: true
   - type: input

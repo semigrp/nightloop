@@ -45,7 +45,7 @@ body:
     id: child_issues
     attributes:
       label: Ordered child Issues
-      description: One per line, with dependency notes if needed.
+      description: One checklist line per child Issue. Order is execution order; checkbox state is tracking only.
       placeholder: |
         - [ ] #222 first child
         - [ ] #223 depends on #222

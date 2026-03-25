@@ -1,18 +1,31 @@
-You are helping prepare a child Issue for `nightloop`.
+You are helping estimate a child Issue for `nightloop`.
 
-Given:
-- the Issue body
-- the linked source-of-truth docs
+You will receive:
+- the child Issue body
 - the target change size
 - the documentation impact
-- the dependencies
+- the dependency list
 
-Return:
-1. recommended model profile: fast / balanced / deep
-2. optional exact model override only if strongly justified
-3. estimated execution time in minutes for a local Codex run
-4. estimation confidence: low / medium / high
-5. short reason grounded in scope, verification burden, and likely diff size
-6. split recommendation if the task appears likely to exceed the declared diff budget or 120 minutes
+Rules:
+- keep the estimate reviewability-first
+- do not widen scope
+- treat the estimate as advisory
+- do not emit markdown
+- do not emit prose before or after the JSON object
 
-Do not widen scope. Do not optimize for completeness over reviewability.
+Return JSON only, with this exact shape:
+
+```json
+{
+  "model_profile": "balanced",
+  "estimated_minutes": 65,
+  "confidence": "medium",
+  "notes": "Reason for estimate"
+}
+```
+
+Field rules:
+- `model_profile` must be one of `fast`, `balanced`, or `deep`
+- `estimated_minutes` must be a positive integer
+- `confidence` must be `low`, `medium`, or `high`
+- `notes` must be a short justification grounded in scope, verification burden, and likely diff size

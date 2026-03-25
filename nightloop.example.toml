@@ -1,10 +1,15 @@
+# Copy to `nightloop.toml` and update the repository and agent settings.
+
 [github]
 owner = "your-org"
 repo = "your-repo"
 base_branch = "main"
 
 [agent]
+# Executed for real child-issue implementation runs.
 command = "codex exec"
+# Used only for advisory AI estimation / planning prompts.
+# It should return JSON for `estimate-issue --basis ai`.
 plan_command = "codex exec"
 working_directory = "."
 default_model = "gpt-5.4"

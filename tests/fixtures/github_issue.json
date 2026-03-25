@@ -1,0 +1,11 @@
+{
+  "number": 221,
+  "title": "Parent issue",
+  "body": "## Ordered child Issues\n- [ ] #222 task",
+  "state": "OPEN",
+  "labels": [
+    { "name": "campaign" },
+    { "name": "night-run" }
+  ],
+  "url": "https://example.com/issues/221"
+}

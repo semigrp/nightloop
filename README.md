@@ -1,179 +1,323 @@
 # nightloop
 
-`nightloop` is a minimal, issue-first nightly execution runner for coding agents.
+`nightloop` is a minimal Rust CLI for local, issue-first nightly execution of coding agents.
 
-It is designed for one job: take a parent GitHub Issue that represents a campaign, select runnable child Issues in dependency order, implement them one by one with an agent, verify the result locally, and leave draft PRs or local branches that a human can review in the morning.
+It treats GitHub child Issues as the only executable work units:
 
-The design goal is deliberately narrow:
+- Parent Issue = campaign / plan container
+- Child Issue = runnable implementation unit
+- Night run = execute as many runnable child Issues as fit in a selected 2–6 hour budget
 
-- issue-first, not framework-first
-- simple, composable, local execution
-- reviewable PRs, not giant overnight diffs
-- generic enough for any repo, but strong enough for product teams
-- compatible with Codex-first workflows, without hard-coding one vendor into the core design
+The core stays provider-agnostic. `nightloop` shells out to local tools instead of embedding a GitHub SDK or a vendor-specific agent runtime:
 
-## Core model
+- `gh` for GitHub reads and writes
+- `git` for branches, commits, and diff accounting
+- configured shell commands for agent execution and optional AI estimation
 
-- **Parent Issue** = campaign / plan unit
-- **Child Issue** = implementation unit
-- **Night run** = process as many runnable child Issues as fit in the selected time budget
+## Status
 
-`nightloop` does **not** try to invent work from scratch. It expects humans and agents together to produce:
-
-1. PRD
-2. spec
-3. implementation plan
-4. child Issues
-5. eval / verification notes
-
-Then `nightloop` executes the queue.
-
-## Why this shape
-
-The current agentic coding workflow has converged on a rough sequence of `spec -> plan -> tasks`, with reusable agent guidance such as `AGENTS.md` and skills layered on top. GitHub Spec Kit explicitly models `spec`, then a technical implementation plan, then tasks. Codex guidance recommends durable repository guidance in `AGENTS.md`, and OpenAI skills package instructions, resources, and optional scripts for repeatable workflows. GitHub also supports structured Issue forms, which makes Issue quality enforceable at input time. See the cited references in `docs/blueprint.md`.
-
-## What is intentionally out of scope
-
-- automatic merge to `main`
-- multi-agent parallel orchestration
-- autonomous roadmap generation
-- deep PM features
-- vendor-specific planning logic in the Rust core
-
-Those can be added later, but are excluded from v0 on purpose.
-
-## Repository layout
-
-```text
-nightloop/
-  Cargo.toml
-  README.md
-  AGENTS.md
-  nightloop.example.toml
-  src/
-    main.rs
-    config.rs
-    budget.rs
-    estimate.rs
-    telemetry.rs
-    issue_lint.rs
-    models.rs
-    selection.rs
-    docs_support.rs
-    errors.rs
-  docs/
-    blueprint.md
-    templates/
-      prd.md
-      spec.md
-      plan.md
-      eval.md
-      adr.md
-  prompts/
-    refine_prd.md
-    refine_spec.md
-    child_issue_from_plan.md
-    estimate_issue.md
-  .github/
-    ISSUE_TEMPLATE/
-      campaign-parent.yml
-      child-task.yml
-    pull_request_template.md
-```
-
-## First release scope
-
-### Required CLI commands
+This repository now implements the v0 CLI surface:
 
 - `nightloop budget --hours 2|3|4|5|6`
 - `nightloop lint-issue path/to/issue.md`
-- `nightloop estimate-issue path/to/issue.md --basis hybrid`
+- `nightloop estimate-issue path/to/issue.md --basis template|local|hybrid|ai`
 - `nightloop record-run path/to/run-record.json`
 - `nightloop docs-check`
-- `nightloop run --parent 221 --hours 4`
+- `nightloop run --parent 221 --hours 4 [--dry-run]`
 
-### Required runtime behavior
+Output is intentionally compact and machine-readable. Each line is a `key=value` record.
 
-- select runnable child Issues from the parent campaign
-- enforce dependency order
-- respect line-change budgets
-- stop on failure by default
-- update issue state labels
-- create one branch / one PR per child Issue
-- leave a morning summary on the parent Issue
-- estimate each child Issue before scheduling it into the nightly window
+## Required Local Tools
 
-## Time budgeting
+- Rust 1.78-compatible toolchain
+- `git`
+- `gh`
+- a configured agent command in `nightloop.toml`
 
-The runner still supports a fallback fixed-slot model, but the main scheduler should use **issue-specific estimated minutes**, not a single global cycle length.
+For real `run` execution:
 
-Default fallback model:
+- `gh auth status` must succeed
+- the git worktree must be clean before the run starts
+- the configured base branch must exist locally
 
-- issue implementation cycle: `40` minutes
-- fixed startup/cleanup overhead: `20` minutes
+## Quickstart
 
-That remains useful when no estimates exist yet. Once local telemetry exists, scheduling should pack Issues by summed estimated minutes.
+1. Copy [`nightloop.example.toml`](/Users/semigrp/dev/nightloop/nightloop.example.toml) to `nightloop.toml` and update the repo and agent settings.
+2. Ensure `gh` is authenticated for the target repository.
+3. Author parent and child Issues using the templates in [`.github/ISSUE_TEMPLATE/`](/Users/semigrp/dev/nightloop/.github/ISSUE_TEMPLATE).
+4. Check issue quality locally:
 
-## Estimation model
+```sh
+nightloop lint-issue path/to/child-issue.md
+nightloop docs-check
+nightloop estimate-issue path/to/child-issue.md --basis hybrid
+```
 
-At Issue creation time, each child Issue should carry:
+5. Simulate a campaign:
 
-- suggested model profile
-- optional exact model override
-- estimated execution time in minutes
-- estimation basis (`template`, `local`, `hybrid`, `ai`, or `manual`)
-- optional confidence note
+```sh
+nightloop run --parent 221 --hours 4 --dry-run
+```
 
-`nightloop` should support two estimation inputs and one optional third input:
+6. Execute the campaign for real:
 
-1. **Template prior** — fast heuristic from target size, docs impact, and dependency count.
-2. **Local telemetry** — empirical history from previous local runs, stored in JSONL.
-3. **AI assist** — optional rough estimate generated from the Issue body and source docs using the configured planning agent.
+```sh
+nightloop run --parent 221 --hours 4
+```
 
-The recommended default is **hybrid**:
+## Issue Contracts
 
-- use template priors early in a new repo
-- prefer local telemetry once there are enough comparable samples
-- optionally show an AI estimate beside both numbers, but do not make it the sole source of truth
+### Parent Issues
 
-## Model selection
+`nightloop run` parses the parent `## Ordered child Issues` section and preserves the listed order.
 
-Codex lets you set a default model in `config.toml`, override it per run, and switch models interactively. The public docs currently recommend `gpt-5.4` for most Codex tasks, while `gpt-5.4-mini` is positioned as a faster option for lighter coding tasks and subagents. `nightloop` should therefore treat **model profiles** as first-class configuration and keep the exact model name override optional in each Issue. See `docs/blueprint.md` for citations.
+Supported checklist lines:
 
-A practical default profile set is:
+- `- [ ] #222 first child`
+- `- [x] #223 already done`
+- `- [ ] #224 depends on #223`
 
-- `fast` -> `gpt-5.4-mini`
-- `balanced` -> `gpt-5.4`
-- `deep` -> `gpt-5.4` with higher reasoning effort
+The checkbox state is tracking-only. GitHub Issue state and labels are the execution truth.
 
-## Diff budget control
+### Child Issues
 
-The product should let users constrain review size between 50 and 1000 changed lines.
+`lint-issue` and `run` validate child Issues against the following sections:
 
-Recommended bands:
+- `## Background`
+- `## Goal`
+- `## Scope`
+- `## Out of scope`
+- `## Source of truth`
+- `## Implementation constraints` (optional)
+- `## Acceptance criteria`
+- `## Verification`
+- `## Dependencies`
+- `## Target change size`
+- `## Documentation impact`
+- `## Suggested model profile`
+- `## Suggested model override` (optional)
+- `## Estimated execution time`
+- `## Estimation basis`
+- `## Estimation confidence`
 
-- `XS` = 50–120
-- `S` = 120–250
-- `M` = 250–500
-- `L` = 500–1000
+The parser accepts both `## Heading` and `### Heading`, so local markdown snapshots and GitHub Issue form bodies both work.
 
-Policy:
+### Source Of Truth
 
-- If an Issue is estimated above `L`, it must be split before a night run.
-- If an implemented diff exceeds configured max lines, the runner marks the Issue blocked or split-required.
-- If an implemented diff falls below min lines, it is accepted only if the Issue explicitly declares doc-only or config-only scope.
+Inside `## Source of truth`, use one reference per non-empty line.
 
-## Configuration
+Allowed forms:
 
-See `nightloop.example.toml`.
+- repo-relative paths
+- absolute local paths
+- `http://` or `https://` URLs
 
-Key additions in v0.2 design:
+`lint-issue` validates local paths exist. URL validation is syntax-only.
 
-- model profiles with exact Codex models and reasoning effort
-- telemetry history path
-- heuristic estimation weights
-- min/max nightly window hours
+### Verification
 
-## Notes
+`nightloop` only accepts two verification formats:
 
-This repository is intentionally text-first. In this environment, Rust toolchain verification was not available, so the included Rust files are a starter scaffold rather than a compiled build.
+1. A fenced shell block:
+
+```sh
+cargo test
+cargo fmt --check
+```
+
+2. `cmd:` lines:
+
+- `cmd: cargo test`
+- `cmd: cargo fmt --check`
+
+Free-form prose in `## Verification` is ignored. If the section exists but yields zero parseable commands, lint fails.
+
+### Small Diff Exceptions
+
+Below-minimum diffs are accepted only when `## Scope` contains an exact line:
+
+- `docs-only`
+- `config-only`
+
+That exception is conservative by design. The runner does not guess intent from prose.
+
+## Scheduling And Eligibility
+
+Hours are selected explicitly between 2 and 6.
+
+`budget` still reports the fallback slot model:
+
+- `fallback_slots = floor((hours * 60 - fixed_overhead_minutes) / fallback_cycle_minutes)`
+
+`run` uses issue-specific estimated minutes instead:
+
+- reserve fixed overhead
+- preserve parent order
+- preserve dependency order
+- select issues until the remaining nightly budget is exhausted
+
+A child Issue is eligible only if all of the following are true:
+
+- the Issue is open
+- it has the `night-run` label
+- it has the `agent:ready` label
+- it does not already have `agent:running`, `agent:blocked`, `agent:done`, or `agent:review`
+- dependencies are already closed / done on GitHub or planned/completed earlier in the same run
+- child metadata parses and lints successfully
+- the target size band fits within the configured global diff limits
+
+## Estimation Modes
+
+The CLI supports four estimation modes:
+
+- `template`
+- `local`
+- `hybrid`
+- `ai`
+
+Child Issue metadata may still declare `manual` as the recorded estimation basis for backward compatibility, but `estimate-issue --basis` only accepts the four runtime modes above.
+
+`hybrid` is the recommended default:
+
+- template priors give the initial estimate
+- local telemetry takes over once enough similar successful runs exist
+- `ai` calls `agent.plan_command`, but remains advisory
+
+When `--basis ai` is requested:
+
+- `nightloop` still computes the baseline template/local/hybrid estimate
+- the planning command reads [`prompts/estimate_issue.md`](/Users/semigrp/dev/nightloop/prompts/estimate_issue.md)
+- the planning command is expected to return JSON only
+- the CLI reports the AI estimate alongside the baseline
+- scheduler logic still uses the baseline estimate
+
+## Run Behavior
+
+### Dry Run
+
+`nightloop run --dry-run`:
+
+- fetches the parent Issue
+- parses child Issue numbers
+- fetches each child Issue with `gh issue view`
+- lints and estimates each child
+- applies eligibility rules
+- packs the nightly window
+- prints selected and skipped children plus reasons
+
+Dry-run makes no GitHub writes and no git changes.
+
+### Real Run
+
+`nightloop run`:
+
+1. requires valid `gh` auth and a clean worktree
+2. fetches and prepares the campaign exactly as dry-run does
+3. creates `.nightloop/runs/<timestamp>-parent-<id>/child-<id>/`
+4. snapshots issue metadata and writes an agent prompt file
+5. moves the child Issue from `agent:ready` to `agent:running`
+6. creates a stacked branch for the child
+7. executes `agent.command`
+8. runs the parsed verification commands locally
+9. measures changed lines with `git diff --numstat <base_sha> HEAD`
+10. on success:
+   - commits changes
+   - creates a draft PR
+   - removes `agent:running`
+   - adds `agent:review`
+   - comments a concise success summary on the child Issue
+   - appends telemetry
+11. on failure:
+   - removes `agent:running`
+   - adds `agent:blocked`
+   - comments a concise failure summary on the child Issue
+   - appends telemetry
+   - stops the campaign when `stop_on_failure = true`
+12. comments a concise summary on the parent Issue
+
+### Stacked PR Strategy
+
+The first successful child branch is created from `github.base_branch`.
+
+Each later successful child branch in the same run is created from the current HEAD produced by the previous successful child. Draft PR bases follow the same chain:
+
+- first PR base = configured base branch
+- later PR base = previous successful child branch
+
+This is the v0 reviewability strategy. `nightloop` does not implement merge queues or multi-agent orchestration.
+
+## Diff Budget Enforcement
+
+Two checks are enforced separately:
+
+- the global diff budget from `[diff]`
+- the child Issue target size band
+
+If the implemented diff exceeds either maximum, the Issue is blocked.
+
+If the diff falls below either minimum, it is accepted only when the child Issue uses the explicit `docs-only` or `config-only` scope marker described above.
+
+## Telemetry
+
+`record-run` appends JSON objects to the configured JSONL history path. The same schema is used by the real runner.
+
+Each record includes:
+
+- `run_id`
+- `parent_issue`
+- `issue_number`
+- `issue_title`
+- `model_profile`
+- `model`
+- `reasoning_effort`
+- `target_size`
+- `docs_impact`
+- `estimated_minutes`
+- `actual_minutes`
+- `changed_lines`
+- `files_touched`
+- `success`
+- `status`
+- `branch`
+- `pr_base`
+- `pr_url`
+- `recorded_at`
+
+Local estimation uses successful historical records matched by model profile, target size, and documentation impact.
+
+## Repository Layout
+
+```text
+src/
+  lib.rs
+  main.rs
+  config.rs
+  models.rs
+  issue_parse.rs
+  issue_lint.rs
+  estimate.rs
+  selection.rs
+  diff_budget.rs
+  github.rs
+  git_ops.rs
+  agent_exec.rs
+  runner.rs
+  telemetry.rs
+  docs_support.rs
+  reporting.rs
+tests/
+  cli.rs
+  fixtures/
+```
+
+## Non-Goals
+
+Still intentionally out of scope for v0:
+
+- merge queues
+- auto-merge
+- background scheduling daemons
+- cloud services
+- web UI
+- issue creation bots
+- multi-agent orchestration
