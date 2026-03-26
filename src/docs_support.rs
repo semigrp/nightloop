@@ -4,20 +4,9 @@ use anyhow::Result;
 
 use crate::config::Config;
 
-const REQUIRED_TEMPLATE_FILES: &[&str] = &[
-    "docs/templates/prd.md",
-    "docs/templates/spec.md",
-    "docs/templates/plan.md",
-    "docs/templates/eval.md",
-    "docs/templates/adr.md",
-];
-
-const REQUIRED_PROMPT_FILES: &[&str] = &[
-    "prompts/refine_prd.md",
-    "prompts/refine_spec.md",
-    "prompts/child_issue_from_plan.md",
-    "prompts/estimate_issue.md",
-    "prompts/plan_child_issue.md",
+const REQUIRED_CONTROL_FILES: &[(&str, &str)] = &[
+    ("prompt", "prompts/plan_child_issue.md"),
+    ("template", "docs/templates/plan.md"),
 ];
 
 #[derive(Debug)]
@@ -45,21 +34,11 @@ pub fn check_docs(config: &Config) -> Result<DocsReport> {
         }
     }
 
-    for path in REQUIRED_TEMPLATE_FILES {
-        let path = config.resolve_control_path(&PathBuf::from(path));
+    for (kind, relative) in REQUIRED_CONTROL_FILES {
+        let path = config.resolve_control_path(&PathBuf::from(relative));
         if !path.exists() {
             missing_paths.push(MissingPath {
-                kind: "template".to_string(),
-                path,
-            });
-        }
-    }
-
-    for path in REQUIRED_PROMPT_FILES {
-        let path = config.resolve_control_path(&PathBuf::from(path));
-        if !path.exists() {
-            missing_paths.push(MissingPath {
-                kind: "prompt".to_string(),
+                kind: (*kind).to_string(),
                 path,
             });
         }
@@ -85,18 +64,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("docs/templates")).unwrap();
         fs::create_dir_all(root.join("prompts")).unwrap();
-        fs::write(root.join("README.md"), "ok").unwrap();
-        fs::write(root.join("AGENTS.md"), "ok").unwrap();
-        for file in ["prd.md", "spec.md", "plan.md", "eval.md", "adr.md"] {
-            fs::write(root.join("docs/templates").join(file), "ok").unwrap();
-        }
-        for file in [
-            "refine_prd.md",
-            "refine_spec.md",
-            "child_issue_from_plan.md",
-        ] {
-            fs::write(root.join("prompts").join(file), "ok").unwrap();
-        }
+        fs::write(root.join("docs/templates/plan.md"), "ok").unwrap();
         let config_path = root.join("config.toml");
         fs::write(
             &config_path,
@@ -104,8 +72,6 @@ mod tests {
 owner = "o"
 repo = "r"
 base_branch = "main"
-request_copilot_review = false
-copilot_reviewer = "github-copilot[bot]"
 
 [agent]
 command = "echo agent"
@@ -152,7 +118,6 @@ required_paths = ["README.md", "AGENTS.md"]
 
 [estimation]
 default_basis = "hybrid"
-allow_ai_assist = true
 template_minutes_xs = 35
 template_minutes_s = 50
 template_minutes_m = 80
@@ -179,6 +144,6 @@ template_weight = 0.35
         assert!(report
             .missing_paths
             .iter()
-            .any(|item| item.path.ends_with("prompts/estimate_issue.md")));
+            .any(|item| item.path.ends_with("prompts/plan_child_issue.md")));
     }
 }

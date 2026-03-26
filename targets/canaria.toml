@@ -1,20 +1,11 @@
-# Copy to `nightloop.toml` and update the repository and agent settings.
-
 [github]
 owner = "UTAGEDA"
 repo = "canaria"
 base_branch = "main"
-request_copilot_review = true
-copilot_reviewer = "github-copilot[bot]"
 
 [agent]
-# Executed for real child-issue implementation runs.
 command = "codex exec --full-auto"
-# Used only for advisory AI estimation / planning prompts.
-# It should return JSON for `estimate-issue --basis ai`.
 plan_command = "codex exec --full-auto"
-# Canonical target repo root. Relative paths resolve from the directory
-# containing `nightloop.toml`, so this can point at another checkout.
 working_directory = "/Users/semigrp/dev/canaria"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
@@ -52,14 +43,7 @@ fixed_overhead_minutes = 20
 stop_on_failure = true
 one_branch_per_child = true
 one_pr_per_child = true
-# Stored under the target repo root unless you provide an absolute path.
 run_root = ".nightloop/runs"
-
-[review_loop]
-review_poll_interval_seconds = 120
-review_wait_timeout_minutes = 90
-review_max_fix_rounds = 1
-planner_prompt_prefix = "/plan"
 
 [diff]
 min_lines = 50
@@ -76,11 +60,10 @@ blocked = "agent:blocked"
 done = "agent:done"
 
 [docs]
-required_paths = ["README.md", "AGENTS.md", "docs/"]
+required_paths = ["README.md", "AGENTS.md"]
 
 [estimation]
 default_basis = "hybrid"
-allow_ai_assist = true
 template_minutes_xs = 35
 template_minutes_s = 50
 template_minutes_m = 80
@@ -91,7 +74,6 @@ docs_penalty_user_facing = 10
 docs_penalty_architecture = 15
 
 [telemetry]
-# Also resolved from the target repo root unless absolute.
 history_path = ".nightloop/history.jsonl"
 min_samples_for_local = 3
 local_weight = 0.65

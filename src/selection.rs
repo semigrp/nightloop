@@ -69,8 +69,6 @@ mod tests {
 owner = "o"
 repo = "r"
 base_branch = "main"
-request_copilot_review = false
-copilot_reviewer = "github-copilot[bot]"
 
 [agent]
 command = "echo agent"
@@ -116,7 +114,6 @@ required_paths = []
 
 [estimation]
 default_basis = "hybrid"
-allow_ai_assist = true
 template_minutes_xs = 35
 template_minutes_s = 50
 template_minutes_m = 80

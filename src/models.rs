@@ -111,7 +111,6 @@ pub enum EstimationBasis {
     Template,
     Local,
     Hybrid,
-    Ai,
     Manual,
 }
 
@@ -121,7 +120,6 @@ impl EstimationBasis {
             "template" => Some(Self::Template),
             "local" => Some(Self::Local),
             "hybrid" => Some(Self::Hybrid),
-            "ai" => Some(Self::Ai),
             "manual" => Some(Self::Manual),
             _ => None,
         }
@@ -132,7 +130,6 @@ impl EstimationBasis {
             Self::Template => "template",
             Self::Local => "local",
             Self::Hybrid => "hybrid",
-            Self::Ai => "ai",
             Self::Manual => "manual",
         }
     }

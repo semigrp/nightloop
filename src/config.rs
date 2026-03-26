@@ -12,8 +12,6 @@ pub struct Config {
     pub agent: Agent,
     #[serde(rename = "loop")]
     pub loop_cfg: LoopConfig,
-    #[serde(default)]
-    pub review_loop: ReviewLoopConfig,
     pub diff: DiffConfig,
     pub labels: Labels,
     pub docs: DocsConfig,
@@ -30,10 +28,6 @@ pub struct GitHub {
     pub owner: String,
     pub repo: String,
     pub base_branch: String,
-    #[serde(default)]
-    pub request_copilot_review: bool,
-    #[serde(default = "default_copilot_reviewer")]
-    pub copilot_reviewer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,35 +64,6 @@ pub struct LoopConfig {
     pub run_root: PathBuf,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct ReviewLoopConfig {
-    #[serde(default = "default_review_poll_interval_seconds")]
-    pub review_poll_interval_seconds: u32,
-    #[serde(default = "default_review_wait_timeout_minutes")]
-    pub review_wait_timeout_minutes: u32,
-    #[serde(default = "default_review_max_fix_rounds")]
-    pub review_max_fix_rounds: u32,
-    #[serde(default = "default_planner_prompt_prefix")]
-    pub planner_prompt_prefix: String,
-    #[serde(default = "default_auto_split_stages")]
-    pub auto_split_stages: bool,
-    #[serde(default = "default_max_split_stages")]
-    pub max_split_stages: u32,
-}
-
-impl Default for ReviewLoopConfig {
-    fn default() -> Self {
-        Self {
-            review_poll_interval_seconds: default_review_poll_interval_seconds(),
-            review_wait_timeout_minutes: default_review_wait_timeout_minutes(),
-            review_max_fix_rounds: default_review_max_fix_rounds(),
-            planner_prompt_prefix: default_planner_prompt_prefix(),
-            auto_split_stages: default_auto_split_stages(),
-            max_split_stages: default_max_split_stages(),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 pub struct DiffConfig {
     pub min_lines: u32,
@@ -125,7 +90,6 @@ pub struct DocsConfig {
 #[derive(Debug, Deserialize)]
 pub struct EstimationConfig {
     pub default_basis: String,
-    pub allow_ai_assist: bool,
     pub template_minutes_xs: u32,
     pub template_minutes_s: u32,
     pub template_minutes_m: u32,
@@ -155,7 +119,7 @@ impl Config {
             .with_context(|| format!("failed to read config from {}", path.display()))?;
         let mut cfg = toml::from_str::<Self>(&raw)
             .with_context(|| format!("failed to parse TOML config from {}", path.display()))?;
-        cfg.control_root = normalize_path(&control_root);
+        cfg.control_root = normalize_path(control_root);
         cfg.target_repo_root =
             normalize_path(&if Path::new(&cfg.agent.working_directory).is_absolute() {
                 PathBuf::from(&cfg.agent.working_directory)
@@ -199,10 +163,6 @@ impl Config {
 
     pub fn telemetry_history_path(&self) -> PathBuf {
         self.resolve_target_path(&self.telemetry.history_path)
-    }
-
-    pub fn split_state_root(&self) -> PathBuf {
-        self.resolve_target_path(Path::new(".nightloop/splits"))
     }
 
     pub fn resolve_target_path(&self, path: &Path) -> PathBuf {
@@ -262,7 +222,6 @@ pub fn render_named_target_config(
     plan_command: &str,
     default_model: &str,
     default_reasoning_effort: &str,
-    request_copilot_review: bool,
 ) -> String {
     template
         .replacen(
@@ -278,11 +237,6 @@ pub fn render_named_target_config(
         .replacen(
             r#"base_branch = "main""#,
             &format!(r#"base_branch = "{}""#, escape_toml_string(base_branch)),
-            1,
-        )
-        .replacen(
-            r#"request_copilot_review = false"#,
-            &format!("request_copilot_review = {request_copilot_review}"),
             1,
         )
         .replacen(
@@ -318,36 +272,8 @@ pub fn render_named_target_config(
         )
 }
 
-fn default_copilot_reviewer() -> String {
-    "github-copilot[bot]".to_string()
-}
-
 fn default_run_root() -> PathBuf {
     PathBuf::from(".nightloop/runs")
-}
-
-fn default_review_poll_interval_seconds() -> u32 {
-    120
-}
-
-fn default_review_wait_timeout_minutes() -> u32 {
-    90
-}
-
-fn default_review_max_fix_rounds() -> u32 {
-    1
-}
-
-fn default_planner_prompt_prefix() -> String {
-    "/plan".to_string()
-}
-
-fn default_auto_split_stages() -> bool {
-    true
-}
-
-fn default_max_split_stages() -> u32 {
-    4
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -432,7 +358,6 @@ required_paths = ["README.md"]
 
 [estimation]
 default_basis = "hybrid"
-allow_ai_assist = true
 template_minutes_xs = 35
 template_minutes_s = 50
 template_minutes_m = 80
@@ -460,14 +385,9 @@ template_weight = 0.35
             config.target_repo_root().join(".nightloop/history.jsonl")
         );
         assert_eq!(
-            config.resolve_control_path(std::path::Path::new("prompts/estimate_issue.md")),
-            config.control_root().join("prompts/estimate_issue.md")
+            config.resolve_control_path(std::path::Path::new("prompts/plan_child_issue.md")),
+            config.control_root().join("prompts/plan_child_issue.md")
         );
-        assert_eq!(
-            config.resolve_target_path(std::path::Path::new("README.md")),
-            config.target_repo_root().join("README.md")
-        );
-        assert_eq!(config.review_loop.planner_prompt_prefix, "/plan");
     }
 
     #[test]
@@ -496,12 +416,6 @@ template_weight = 0.35
             resolve_config_path(&root, None, None).unwrap(),
             root.join("nightloop.toml")
         );
-        assert_eq!(
-            resolve_config_path(&root, None, Some("missing"))
-                .unwrap_err()
-                .to_string(),
-            "target_config_not_found"
-        );
     }
 
     #[test]
@@ -516,19 +430,12 @@ template_weight = 0.35
             "codex exec --planner",
             "gpt-5.4-mini",
             "high",
-            true,
         );
         assert!(rendered.contains(r#"owner = "UTAGEDA""#));
         assert!(rendered.contains(r#"repo = "canaria""#));
         assert!(rendered.contains(r#"base_branch = "develop""#));
-        assert!(rendered.contains(r#"request_copilot_review = true"#));
-        assert!(rendered.contains(r#"command = "codex exec --full-auto""#));
         assert!(rendered.contains(r#"plan_command = "codex exec --planner""#));
-        assert!(rendered.contains(r#"planner_prompt_prefix = "/plan""#));
-        assert!(rendered.contains(r#"auto_split_stages = true"#));
-        assert!(rendered.contains(r#"max_split_stages = 4"#));
-        assert!(rendered.contains(r#"working_directory = "/tmp/canaria""#));
-        assert!(rendered.contains(r#"default_model = "gpt-5.4-mini""#));
-        assert!(rendered.contains(r#"default_reasoning_effort = "high""#));
+        assert!(!rendered.contains("request_copilot_review"));
+        assert!(!rendered.contains("[review_loop]"));
     }
 }

@@ -1,24 +1,17 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::{collections::HashSet, fs, path::Path, time::Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     agent_exec::{self, CommandRunOptions},
     budget,
     config::Config,
-    diff_budget::{self, DiffStat},
+    diff_budget::DiffStat,
     estimate::{self, EstimateBasis},
     git_ops,
     github::GitHubClient,
-    issue_lint::{self, LintFinding},
-    issue_parse,
+    issue_lint, issue_parse,
     models::{ChildIssue, IssueEstimate, IssueSnapshot, ParentIssue, RunRecord},
     reporting, selection, telemetry,
 };
@@ -45,294 +38,52 @@ impl RunReport {
     }
 }
 
-impl PreparedIssue {
-    fn repair(&mut self, repair: RepairAction) {
-        if !self.repairs.contains(&repair) {
-            self.repairs.push(repair);
-        }
-    }
-
-    fn render_real_repair_lines(&self) -> Vec<Vec<(String, String)>> {
-        self.repairs
-            .iter()
-            .filter_map(|repair| match repair.kind {
-                RepairKind::ClearRunning
-                | RepairKind::RestoreReadyFromBlocked
-                | RepairKind::DeleteStaleBranch
-                | RepairKind::AdvanceSplitStage
-                | RepairKind::CompleteSplitPlan => {
-                    let mut line = vec![
-                        ("child_issue".to_string(), self.snapshot.number.to_string()),
-                        ("repair".to_string(), repair.value.clone()),
-                    ];
-                    if let Some(branch) = &repair.branch {
-                        line.push(("branch".to_string(), branch.clone()));
-                    }
-                    Some(line)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn render_dry_run_repair_lines(&self) -> Vec<Vec<(String, String)>> {
-        self.repairs
-            .iter()
-            .filter_map(|repair| match repair.kind {
-                RepairKind::WouldClearRunning
-                | RepairKind::WouldRestoreReadyFromBlocked
-                | RepairKind::WouldDeleteStaleBranch => {
-                    let mut line = vec![
-                        ("child_issue".to_string(), self.snapshot.number.to_string()),
-                        (
-                            "repair".to_string(),
-                            match repair.kind {
-                                RepairKind::WouldClearRunning => "would_clear_running",
-                                RepairKind::WouldRestoreReadyFromBlocked => {
-                                    "would_restore_ready_from_blocked"
-                                }
-                                RepairKind::WouldDeleteStaleBranch => "would_delete_stale_branch",
-                                _ => unreachable!(),
-                            }
-                            .to_string(),
-                        ),
-                    ];
-                    if let Some(branch) = &repair.branch {
-                        line.push(("branch".to_string(), branch.clone()));
-                    }
-                    Some(line)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone)]
 struct PreparedIssue {
     snapshot: IssueSnapshot,
     child: Option<ChildIssue>,
     estimate: Option<IssueEstimate>,
-    reasons: Vec<String>,
-    lint_findings: Vec<LintFinding>,
     status: String,
-    actual_minutes: Option<u32>,
-    branch: Option<String>,
-    pr_url: Option<String>,
-    copilot_review: Option<String>,
+    reasons: Vec<String>,
     detail: Option<String>,
-    git_stderr: Option<String>,
-    gh_stderr: Option<String>,
-    recovery: Option<String>,
-    repairs: Vec<RepairAction>,
-    split_mode: Option<String>,
-    stage_index: Option<u32>,
-    stage_total: Option<u32>,
-    split_state: Option<String>,
-    split_plan: Option<SplitStateRecord>,
+    branch: Option<String>,
+    pr_base: Option<String>,
+    pr_url: Option<String>,
+    actual_minutes: Option<u32>,
+    changed_lines: Option<u32>,
+    files_touched: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
 struct PreparedCampaign {
     parent: ParentIssue,
     issues: Vec<PreparedIssue>,
-    issue_snapshots: HashMap<u64, IssueSnapshot>,
-    dependency_done_cache: HashMap<u64, bool>,
-    estimated_total_minutes: u32,
-    remaining_minutes: u32,
-    hours: u32,
     target_repo_match: String,
-    target_repo_root: String,
+    estimated_total_minutes: u32,
+    available_minutes: u32,
     run_root: String,
-    detail: Option<String>,
-    git_stderr: Option<String>,
-    gh_stderr: Option<String>,
-    recovery: Option<String>,
-    repair_lines: Vec<Vec<(String, String)>>,
-    labels_repaired: u32,
-    issues_repaired: u32,
-    branches_repaired: u32,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ReviewLoopState {
-    workflow: String,
-    selected_child_issue: Option<u64>,
-    plan_generated: bool,
-    copilot_review_status: Option<String>,
-    review_fix_rounds: u32,
-    review_comments_total: u32,
-    review_comments_applied: u32,
-    review_comments_ignored: u32,
-    split_mode: Option<String>,
-    stage_index: Option<u32>,
-    stage_total: Option<u32>,
-    split_state: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct SetupFailure {
-    code: String,
-    detail: Option<String>,
-    git_stderr: Option<String>,
-    gh_stderr: Option<String>,
-    recovery: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RepairAction {
-    kind: RepairKind,
-    value: String,
-    branch: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RepairKind {
-    ClearRunning,
-    WouldClearRunning,
-    RestoreReadyFromBlocked,
-    WouldRestoreReadyFromBlocked,
-    DeleteStaleBranch,
-    WouldDeleteStaleBranch,
-    AdvanceSplitStage,
-    CompleteSplitPlan,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum StructuredPlanMode {
-    Single,
-    Split,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct StructuredPlanStage {
-    index: u32,
-    title: String,
-    goal: String,
-    boundary: String,
-    acceptance_subset: Vec<String>,
-    estimated_changed_lines: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct StructuredPlan {
-    mode: StructuredPlanMode,
-    summary: String,
-    stages: Vec<StructuredPlanStage>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum SplitPlanStatus {
-    AwaitingReview,
-    AwaitingMerge,
-    ReadyNextStage,
-    Complete,
-}
-
-impl SplitPlanStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::AwaitingReview => "awaiting_review",
-            Self::AwaitingMerge => "awaiting_merge",
-            Self::ReadyNextStage => "ready_next_stage",
-            Self::Complete => "complete",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SplitStateStage {
-    index: u32,
-    title: String,
-    boundary: String,
-    goal: String,
-    acceptance_subset: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SplitStateRecord {
-    parent_issue: u64,
-    child_issue: u64,
-    mode: String,
-    total_stages: u32,
-    current_stage: u32,
-    status: SplitPlanStatus,
-    active_branch: Option<String>,
-    active_pr_url: Option<String>,
-    stages: Vec<SplitStateStage>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-struct ExecutionOutcome {
-    status: ExecutionStatus,
-    actual_minutes: u32,
-    diff_stat: DiffStat,
-    pr_url: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-enum ExecutionStatus {
-    Success,
-    PrePrFailure {
-        code: String,
-        detail: Option<String>,
-        git_stderr: Option<String>,
-        gh_stderr: Option<String>,
-        recovery: Option<String>,
-    },
-    PostPrFailure {
-        code: String,
-        detail: Option<String>,
-        git_stderr: Option<String>,
-        gh_stderr: Option<String>,
-        recovery: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum FlowMode {
-    Nightly,
-    ReviewLoop,
-}
-
-impl SetupFailure {
-    fn new(code: &str) -> Self {
-        Self {
-            code: code.to_string(),
-            detail: None,
-            git_stderr: None,
-            gh_stderr: None,
-            recovery: None,
-        }
-    }
-}
-
-fn repair_action(kind: RepairKind, value: &str, branch: Option<String>) -> RepairAction {
-    RepairAction {
-        kind,
-        value: value.to_string(),
-        branch,
-    }
+struct Publication {
+    branch_name: String,
+    pr_base: String,
+    push_before_pr: bool,
 }
 
 pub fn dry_run(config: &Config, parent_issue_number: u64, hours: u32) -> Result<RunReport> {
     let github = GitHubClient::new(config);
     github.check_auth()?;
     let target_repo_match = preflight_target_repo(config)?;
-    let mut prepared = prepare_campaign(
+    let prepared = prepare_campaign(
         config,
         &github,
         parent_issue_number,
         hours,
+        false,
         target_repo_match,
-        FlowMode::Nightly,
     )?;
-    collect_dry_run_repairs(config, &github, &mut prepared)?;
-    Ok(build_report(&prepared, true, true, 0))
+    Ok(build_report(&prepared, true))
 }
 
 pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Result<RunReport> {
@@ -344,66 +95,184 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         &github,
         parent_issue_number,
         hours,
+        false,
         target_repo_match,
-        FlowMode::Nightly,
     )?;
+    run_selected_issues(config, &github, &mut prepared, false)?;
+    Ok(build_report(&prepared, false))
+}
+
+pub fn start_dry_run(config: &Config, parent_issue_number: u64) -> Result<RunReport> {
+    let github = GitHubClient::new(config);
+    github.check_auth()?;
+    let target_repo_match = preflight_target_repo(config)?;
+    let prepared = prepare_campaign(
+        config,
+        &github,
+        parent_issue_number,
+        config.loop_cfg.default_hours,
+        true,
+        target_repo_match,
+    )?;
+    Ok(build_report(&prepared, true))
+}
+
+pub fn start(config: &Config, parent_issue_number: u64) -> Result<RunReport> {
+    let github = GitHubClient::new(config);
+    github.check_auth()?;
+    let target_repo_match = preflight_target_repo(config)?;
+    let mut prepared = prepare_campaign(
+        config,
+        &github,
+        parent_issue_number,
+        config.loop_cfg.default_hours,
+        true,
+        target_repo_match,
+    )?;
+    run_selected_issues(config, &github, &mut prepared, true)?;
+    Ok(build_report(&prepared, false))
+}
+
+fn prepare_campaign(
+    config: &Config,
+    github: &GitHubClient<'_>,
+    parent_issue_number: u64,
+    hours: u32,
+    single_child: bool,
+    target_repo_match: String,
+) -> Result<PreparedCampaign> {
+    let parent_snapshot = github.view_issue(parent_issue_number)?;
+    let parent = issue_parse::parse_parent_issue(&parent_snapshot)?;
+    let available_minutes = budget::available_minutes(
+        hours,
+        config.loop_cfg.fixed_overhead_minutes,
+        config.loop_cfg.min_hours,
+        config.loop_cfg.max_hours,
+    )?;
+
+    let mut issues = Vec::new();
+    let mut estimated_total_minutes = 0;
+    let mut used_minutes = 0;
+    let mut done_on_github = HashSet::new();
+    let mut planned = HashSet::new();
+
+    for child_ref in &parent.children {
+        let snapshot = github.view_issue(child_ref.number)?;
+        if snapshot.state.as_str() == "closed" || snapshot.has_label(&config.labels.done) {
+            done_on_github.insert(snapshot.number);
+        }
+        let lint = issue_lint::lint_child_issue(config, &snapshot);
+        let mut prepared = PreparedIssue {
+            snapshot: snapshot.clone(),
+            child: None,
+            estimate: None,
+            status: "skipped".to_string(),
+            reasons: Vec::new(),
+            detail: None,
+            branch: None,
+            pr_base: None,
+            pr_url: None,
+            actual_minutes: None,
+            changed_lines: None,
+            files_touched: None,
+        };
+
+        if !lint.valid {
+            prepared.reasons.push("lint_failed".to_string());
+            prepared.detail = Some(
+                lint.findings
+                    .iter()
+                    .map(|finding| finding.code.clone())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            issues.push(prepared);
+            continue;
+        }
+
+        let child = lint
+            .child
+            .ok_or_else(|| anyhow!("missing parsed child after lint success"))?;
+        let basis = EstimateBasis::from_cli_str(&config.estimation.default_basis)
+            .unwrap_or(EstimateBasis::Hybrid);
+        let estimate = estimate::estimate_child_issue(config, &child, basis)?;
+        let mut reasons = selection::static_eligibility_reasons(config, &child);
+        if !selection::dependencies_satisfied(&child, &done_on_github, &planned) {
+            reasons.push("dependency_unsatisfied".to_string());
+        }
+        if !single_child
+            && !selection::pack_issue_if_fit(
+                estimate.estimated_minutes,
+                used_minutes,
+                available_minutes,
+            )
+        {
+            reasons.push("budget_exhausted".to_string());
+        }
+
+        if reasons.is_empty() {
+            prepared.status = "selected".to_string();
+            planned.insert(child.number);
+            used_minutes += estimate.estimated_minutes;
+            estimated_total_minutes += estimate.estimated_minutes;
+            if single_child {
+                prepared.child = Some(child);
+                prepared.estimate = Some(estimate);
+                issues.push(prepared);
+                break;
+            }
+        } else {
+            prepared.reasons = reasons;
+        }
+
+        prepared.child = Some(child);
+        prepared.estimate = Some(estimate);
+        issues.push(prepared);
+    }
+
+    Ok(PreparedCampaign {
+        parent,
+        issues,
+        target_repo_match,
+        estimated_total_minutes,
+        available_minutes,
+        run_root: config.run_root().display().to_string(),
+    })
+}
+
+fn run_selected_issues(
+    config: &Config,
+    github: &GitHubClient<'_>,
+    prepared: &mut PreparedCampaign,
+    single_child: bool,
+) -> Result<()> {
+    ensure_minimal_safe_repairs(config, github)?;
+    ensure_clean_preflight(config)?;
     let workdir = config.working_directory();
-    if let Err(failure) = apply_real_run_repairs(config, &github, &mut prepared) {
-        prepared.detail = failure.detail;
-        prepared.git_stderr = failure.git_stderr;
-        prepared.gh_stderr = failure.gh_stderr;
-        prepared.recovery = failure.recovery;
-        return Ok(build_report(&prepared, false, false, 0));
-    }
-    if let Err(failure) = ensure_clean_preflight(config) {
-        prepared.detail = failure.detail;
-        prepared.git_stderr = failure.git_stderr;
-        prepared.gh_stderr = failure.gh_stderr;
-        prepared.recovery = failure.recovery;
-        return Ok(build_report(&prepared, false, false, 0));
-    }
     git_ops::switch_branch(&workdir, &config.github.base_branch)?;
 
     let run_id = format!(
         "{}-parent-{}",
         Utc::now().format("%Y%m%dT%H%M%SZ"),
-        parent_issue_number
+        prepared.parent.number
     );
     let run_root = config.run_root().join(&run_id);
     fs::create_dir_all(&run_root)?;
 
-    let mut completed_in_run = HashSet::new();
     let mut previous_success_branch: Option<String> = None;
-    let mut actual_total_minutes = 0u32;
-    let mut ok = true;
-
+    let mut stop = false;
     for item in &mut prepared.issues {
-        if item.status != "selected" {
+        if item.status != "selected" || stop {
             continue;
         }
-
         let child = item
             .child
             .clone()
-            .ok_or_else(|| anyhow!("selected issue missing parsed child"))?;
-        if !dependencies_satisfied_live(
-            &child,
-            &prepared.issue_snapshots,
-            &mut prepared.dependency_done_cache,
-            &github,
-            config,
-            &completed_in_run,
-        )? {
-            item.status = "skipped".to_string();
-            item.reasons = vec!["dependency_unsatisfied".to_string()];
-            ok = false;
-            continue;
-        }
-
+            .ok_or_else(|| anyhow!("selected child missing"))?;
         let estimate = item
             .estimate
             .clone()
-            .ok_or_else(|| anyhow!("selected issue missing estimate"))?;
+            .ok_or_else(|| anyhow!("selected estimate missing"))?;
         let child_run_dir = run_root.join(format!("child-{}", child.number));
         fs::create_dir_all(&child_run_dir)?;
         fs::write(
@@ -412,979 +281,252 @@ pub fn run_campaign(config: &Config, parent_issue_number: u64, hours: u32) -> Re
         )?;
         fs::write(child_run_dir.join("issue.md"), &item.snapshot.body)?;
 
-        let branch_name = branch_name_for_stage(parent_issue_number, child.number, None, None);
-        let pr_base = previous_success_branch
-            .clone()
-            .unwrap_or_else(|| config.github.base_branch.clone());
-        let base_sha = if previous_success_branch.is_some() {
-            git_ops::rev_parse(&workdir, "HEAD")?
+        let publication = if single_child {
+            Publication {
+                branch_name: format!("nightloop/{}-{}", prepared.parent.number, child.number),
+                pr_base: config.github.base_branch.clone(),
+                push_before_pr: true,
+            }
+        } else {
+            nightly_branch_publication(
+                prepared.parent.number,
+                child.number,
+                &config.github.base_branch,
+                previous_success_branch.as_deref(),
+            )
+        };
+        item.branch = Some(publication.branch_name.clone());
+        item.pr_base = Some(publication.pr_base.clone());
+
+        let base_sha = if let Some(previous) = &previous_success_branch {
+            if publication.pr_base == *previous {
+                git_ops::rev_parse(&workdir, "HEAD")?
+            } else {
+                git_ops::rev_parse(&workdir, &config.github.base_branch)?
+            }
         } else {
             git_ops::rev_parse(&workdir, &config.github.base_branch)?
         };
 
-        let prompt = build_agent_prompt(&prepared.parent, &child, &estimate, config);
-        let outcome = execute_single_child_flow(
-            config,
-            &github,
-            &prepared.parent,
-            &child,
-            &estimate,
-            item,
-            &run_id,
-            &child_run_dir,
-            &prompt,
-            &branch_name,
-            &pr_base,
-            &base_sha,
-            &mut prepared.branches_repaired,
-            FlowMode::Nightly,
-            false,
-            true,
-        )?;
-        prepared
-            .repair_lines
-            .extend(item.render_real_repair_lines());
-        actual_total_minutes += outcome.actual_minutes;
+        let started_at = Instant::now();
+        let outcome = (|| -> Result<(DiffStat, u32, u32, String)> {
+            prepare_branch(&workdir, &publication.branch_name, &publication.pr_base)?;
+            github.remove_labels(
+                child.number,
+                &[
+                    &config.labels.ready,
+                    &config.labels.blocked,
+                    &config.labels.review,
+                ],
+            )?;
+            github.add_labels(child.number, &[&config.labels.running])?;
+            if single_child {
+                run_plan_phase(config, &child, &estimate, &prepared.parent, &child_run_dir)?;
+            }
+            run_implementation_phase(
+                config,
+                &child,
+                &estimate,
+                &prepared.parent,
+                &child_run_dir,
+                single_child,
+            )?;
+            run_verification(&workdir, &child, &child_run_dir)?;
 
-        match outcome.status {
-            ExecutionStatus::Success => {
-                completed_in_run.insert(child.number);
-                previous_success_branch = Some(branch_name);
+            let diff_stat = git_ops::diff_against(&workdir, &base_sha, &[config.run_root()])?;
+            enforce_diff_budget(&child, &diff_stat, config)?;
+            let files_touched = diff_stat.files_touched;
+            let actual_minutes = started_at.elapsed().as_secs().div_ceil(60) as u32;
+            let commit_message = format!("child #{}: {}", child.number, child.title);
+            git_ops::commit_all(&workdir, &commit_message)?;
+            if publication.push_before_pr {
+                git_ops::push_current_branch(&workdir, &publication.branch_name)?;
             }
-            ExecutionStatus::PrePrFailure {
-                code,
-                detail,
-                git_stderr,
-                gh_stderr,
-                recovery,
-            }
-            | ExecutionStatus::PostPrFailure {
-                code,
-                detail,
-                git_stderr,
-                gh_stderr,
-                recovery,
-            } => {
-                ok = false;
-                if item.reasons.is_empty() {
-                    item.reasons = vec![code];
-                }
-                if item.detail.is_none() {
-                    item.detail = detail;
-                }
-                if item.git_stderr.is_none() {
-                    item.git_stderr = git_stderr;
-                }
-                if item.gh_stderr.is_none() {
-                    item.gh_stderr = gh_stderr;
-                }
-                if item.recovery.is_none() {
-                    item.recovery = recovery;
-                }
-                if item.status == "blocked" {
-                    let clean =
-                        git_ops::ensure_clean_worktree(&workdir, &[config.run_root()]).is_ok();
-                    if !clean || config.loop_cfg.stop_on_failure {
-                        break;
-                    }
-                    if let Some(previous) = &previous_success_branch {
-                        git_ops::switch_branch(&workdir, previous)?;
+            let pr_title = format!("[{}] {}", child.number, child.title);
+            let pr_body = build_pr_body(&prepared.parent, &child, &estimate, single_child);
+            let pr_url = github.create_draft_pr(
+                &publication.pr_base,
+                &publication.branch_name,
+                &pr_title,
+                &pr_body,
+            )?;
+            Ok((diff_stat, actual_minutes, files_touched, pr_url))
+        })();
+
+        match outcome {
+            Ok((diff_stat, actual_minutes, files_touched, pr_url)) => {
+                let changed_lines = diff_stat.changed_lines;
+                github.remove_labels(child.number, &[&config.labels.running])?;
+                github.add_labels(child.number, &[&config.labels.review])?;
+
+                item.status = "success".to_string();
+                item.pr_url = Some(pr_url.clone());
+                item.actual_minutes = Some(actual_minutes);
+                item.changed_lines = Some(changed_lines);
+                item.files_touched = Some(files_touched);
+                previous_success_branch = Some(publication.branch_name.clone());
+
+                let record = RunRecord {
+                    run_id: run_id.clone(),
+                    parent_issue: prepared.parent.number,
+                    issue_number: child.number,
+                    issue_title: child.title.clone(),
+                    model_profile: estimate.model_profile.clone(),
+                    model: estimate.model.clone(),
+                    reasoning_effort: estimate.reasoning_effort.clone(),
+                    target_size: child.target_size.clone(),
+                    docs_impact: child.docs_impact.clone(),
+                    estimated_minutes: estimate.estimated_minutes,
+                    actual_minutes,
+                    changed_lines,
+                    files_touched,
+                    success: true,
+                    status: "success".to_string(),
+                    workflow: if single_child {
+                        "start".to_string()
                     } else {
-                        git_ops::switch_branch(&workdir, &config.github.base_branch)?;
-                    }
-                } else if config.loop_cfg.stop_on_failure {
-                    break;
-                }
+                        "nightly".to_string()
+                    },
+                    planner_used: single_child,
+                    copilot_review: None,
+                    review_comments_total: 0,
+                    review_comments_applied: 0,
+                    review_comments_ignored: 0,
+                    fix_rounds: 0,
+                    split_mode: None,
+                    stage_index: None,
+                    stage_total: None,
+                    stage_completed: false,
+                    active_pr_url: Some(pr_url),
+                    branch: publication.branch_name.clone(),
+                    pr_base: publication.pr_base.clone(),
+                    pr_url: item.pr_url.clone(),
+                    recorded_at: Utc::now(),
+                };
+                telemetry::append_run_record(&config.telemetry_history_path(), &record)?;
+            }
+            Err(err) => {
+                let _ = github.remove_labels(child.number, &[&config.labels.running]);
+                let _ = github.add_labels(child.number, &[&config.labels.blocked]);
+                item.status = if err.to_string() == "split_required" {
+                    "split_required".to_string()
+                } else {
+                    "blocked".to_string()
+                };
+                item.reasons = vec![err.to_string()];
+                item.detail = Some(err.to_string());
+                stop = config.loop_cfg.stop_on_failure || single_child;
             }
         }
     }
 
     github.comment_issue(
         prepared.parent.number,
-        &build_parent_summary(
-            &prepared,
-            hours,
-            prepared.estimated_total_minutes,
-            actual_total_minutes,
-        ),
+        &build_parent_summary(prepared, single_child),
     )?;
 
-    Ok(build_report(&prepared, false, ok, actual_total_minutes))
+    Ok(())
 }
 
-pub fn review_loop_dry_run(config: &Config, parent_issue_number: u64) -> Result<RunReport> {
-    let github = GitHubClient::new(config);
-    github.check_auth()?;
-    let target_repo_match = preflight_target_repo(config)?;
-    let mut prepared = prepare_campaign(
-        config,
-        &github,
-        parent_issue_number,
-        config.loop_cfg.min_hours,
-        target_repo_match,
-        FlowMode::ReviewLoop,
-    )?;
-    collect_dry_run_repairs(config, &github, &mut prepared)?;
-    limit_to_first_selected(&mut prepared);
-    let mut state = ReviewLoopState {
-        workflow: "review_loop".to_string(),
-        selected_child_issue: first_selected_issue(&prepared),
-        plan_generated: first_selected_issue(&prepared).is_some(),
-        copilot_review_status: first_selected_issue(&prepared).map(|_| "requested".to_string()),
-        review_fix_rounds: if first_selected_issue(&prepared).is_some() {
-            1
-        } else {
-            0
-        },
-        ..Default::default()
-    };
-    annotate_review_loop_dry_run(&mut prepared, &mut state);
-    Ok(build_report_with_workflow(
-        &prepared,
-        true,
-        true,
-        0,
-        Some(&state),
-    ))
-}
-
-pub fn review_loop(config: &Config, parent_issue_number: u64) -> Result<RunReport> {
-    let github = GitHubClient::new(config);
-    github.check_auth()?;
-    let target_repo_match = preflight_target_repo(config)?;
-    let mut prepared = prepare_campaign(
-        config,
-        &github,
-        parent_issue_number,
-        config.loop_cfg.min_hours,
-        target_repo_match,
-        FlowMode::ReviewLoop,
-    )?;
-    let workdir = config.working_directory();
-    if let Err(failure) = apply_real_run_repairs(config, &github, &mut prepared) {
-        prepared.detail = failure.detail;
-        prepared.git_stderr = failure.git_stderr;
-        prepared.gh_stderr = failure.gh_stderr;
-        prepared.recovery = failure.recovery;
-        return Ok(build_report_with_workflow(
-            &prepared,
-            false,
-            false,
-            0,
-            Some(&ReviewLoopState {
-                workflow: "review_loop".to_string(),
-                ..Default::default()
-            }),
-        ));
-    }
-    if let Err(failure) = ensure_clean_preflight(config) {
-        prepared.detail = failure.detail;
-        prepared.git_stderr = failure.git_stderr;
-        prepared.gh_stderr = failure.gh_stderr;
-        prepared.recovery = failure.recovery;
-        return Ok(build_report_with_workflow(
-            &prepared,
-            false,
-            false,
-            0,
-            Some(&ReviewLoopState {
-                workflow: "review_loop".to_string(),
-                ..Default::default()
-            }),
-        ));
-    }
-    git_ops::switch_branch(&workdir, &config.github.base_branch)?;
-    limit_to_first_selected(&mut prepared);
-
-    let selected_child = first_selected_issue(&prepared);
-    let mut state = ReviewLoopState {
-        workflow: "review_loop".to_string(),
-        selected_child_issue: selected_child,
-        ..Default::default()
-    };
-    if selected_child.is_none() {
-        return Ok(build_report_with_workflow(
-            &prepared,
-            false,
-            true,
-            0,
-            Some(&state),
-        ));
-    }
-
-    let run_id = format!(
-        "{}-parent-{}",
-        Utc::now().format("%Y%m%dT%H%M%SZ"),
-        parent_issue_number
-    );
-    let run_root = config.run_root().join(&run_id);
-    fs::create_dir_all(&run_root)?;
-
-    let item = prepared
-        .issues
-        .iter_mut()
-        .find(|item| item.status == "selected")
-        .ok_or_else(|| anyhow!("selected child missing"))?;
-    let child = item
-        .child
-        .clone()
-        .ok_or_else(|| anyhow!("selected issue missing parsed child"))?;
-    let estimate = item
-        .estimate
-        .clone()
-        .ok_or_else(|| anyhow!("selected issue missing estimate"))?;
-    let child_run_dir = run_root.join(format!("child-{}", child.number));
-    fs::create_dir_all(&child_run_dir)?;
-    fs::write(
-        child_run_dir.join("issue.json"),
-        serde_json::to_string_pretty(&item.snapshot)?,
-    )?;
-    fs::write(child_run_dir.join("issue.md"), &item.snapshot.body)?;
-
-    let pr_base = config.github.base_branch.clone();
-    let base_sha = git_ops::rev_parse(&workdir, &config.github.base_branch)?;
-
-    let plan_text;
-    if item.split_plan.is_none() {
-        let plan_prompt = build_plan_prompt(&prepared.parent, &child, &estimate, config);
-        let planner_prompt = apply_planner_prompt_prefix(config, &plan_prompt);
-        emit_progress(progress_planning_child(child.number));
-        let plan_result = agent_exec::run_shell_command(
-            &config.agent.plan_command,
-            &workdir,
-            &[(
-                "NIGHTLOOP_PROMPT_FILE".to_string(),
-                child_run_dir.join("plan-prompt.md").display().to_string(),
-            )],
-            CommandRunOptions::streaming("agent").with_stdin(&planner_prompt),
-        )?;
-        fs::write(child_run_dir.join("plan-prompt.md"), &planner_prompt)?;
-        fs::write(child_run_dir.join("plan.stdout"), &plan_result.stdout)?;
-        fs::write(child_run_dir.join("plan.stderr"), &plan_result.stderr)?;
-        if !plan_result.success() {
-            item.status = "skipped".to_string();
-            item.reasons = vec!["plan_command_failed".to_string()];
-            item.detail = Some("planner_command_failed".to_string());
-            if !plan_result.stderr.trim().is_empty() {
-                item.git_stderr = Some(plan_result.stderr.clone());
-            }
-            return Ok(build_report_with_workflow(
-                &prepared,
-                false,
-                false,
-                0,
-                Some(&state),
-            ));
-        }
-        let structured_plan = match extract_structured_plan(&plan_result.stdout, &child, config) {
-            Ok(plan) => plan,
-            Err(err) => {
-                item.status = "skipped".to_string();
-                item.reasons = vec![err.to_string()];
-                item.detail = Some("planner_output_invalid".to_string());
-                return Ok(build_report_with_workflow(
-                    &prepared,
-                    false,
-                    false,
-                    0,
-                    Some(&state),
-                ));
-            }
-        };
-        fs::write(
-            child_run_dir.join("plan.json"),
-            serde_json::to_string_pretty(&structured_plan)?,
-        )?;
-        plan_text = if plan_result.stdout.trim().is_empty() {
-            "No plan output produced.".to_string()
-        } else {
-            plan_result.stdout.clone()
-        };
-        fs::write(child_run_dir.join("plan.md"), &plan_text)?;
-        match structured_plan.mode {
-            StructuredPlanMode::Single => {
-                item.split_mode = Some("single".to_string());
-                item.stage_index = Some(1);
-                item.stage_total = Some(1);
-                item.split_state = Some("single".to_string());
-            }
-            StructuredPlanMode::Split => {
-                let split_state =
-                    split_state_from_plan(prepared.parent.number, child.number, &structured_plan);
-                item.split_mode = Some("split".to_string());
-                item.stage_index = Some(split_state.current_stage);
-                item.stage_total = Some(split_state.total_stages);
-                item.split_state = Some(split_state.status.as_str().to_string());
-                item.split_plan = Some(split_state);
-            }
-        }
-        state.plan_generated = true;
-    } else {
-        plan_text = render_split_plan_markdown(
-            item.split_plan
-                .as_ref()
-                .ok_or_else(|| anyhow!("split_plan_missing"))?,
-        );
-        fs::write(child_run_dir.join("plan.md"), &plan_text)?;
-        state.plan_generated = true;
-    }
-    state.split_mode = item.split_mode.clone();
-    state.stage_index = item.stage_index;
-    state.stage_total = item.stage_total;
-    state.split_state = item.split_state.clone();
-    item.detail = Some("plan_generated".to_string());
-
-    let branch_name = branch_name_for_stage(
-        parent_issue_number,
+fn run_plan_phase(
+    config: &Config,
+    child: &ChildIssue,
+    estimate: &IssueEstimate,
+    parent: &ParentIssue,
+    child_run_dir: &Path,
+) -> Result<()> {
+    let template_path = config.resolve_control_path(Path::new("prompts/plan_child_issue.md"));
+    let template = fs::read_to_string(&template_path)
+        .map_err(|_| anyhow!("failed to read {}", template_path.display()))?;
+    let prompt = format!(
+        "{template}\n\nParent: #{} {}\nChild: #{} {}\nSuggested profile: {}\nEstimated minutes: {}\n\nIssue body:\n{}\n",
+        parent.number,
+        parent.title,
         child.number,
-        item.split_mode.as_deref(),
-        item.stage_index,
+        child.title,
+        estimate.model_profile,
+        estimate.estimated_minutes,
+        child.body
     );
-
-    let implementation_prompt = build_review_loop_implementation_prompt(
-        &prepared.parent,
-        &child,
-        &estimate,
-        config,
-        &plan_text,
-        item.split_plan.as_ref(),
-    );
-    let outcome = execute_single_child_flow(
-        config,
-        &github,
-        &prepared.parent,
-        &child,
-        &estimate,
-        item,
-        &run_id,
-        &child_run_dir,
-        &implementation_prompt,
-        &branch_name,
-        &pr_base,
-        &base_sha,
-        &mut prepared.branches_repaired,
-        FlowMode::ReviewLoop,
-        true,
-        false,
-    )?;
-    prepared
-        .repair_lines
-        .extend(item.render_real_repair_lines());
-    let actual_minutes = outcome.actual_minutes;
-    match outcome.status {
-        ExecutionStatus::Success => {}
-        ExecutionStatus::PrePrFailure {
-            code,
-            detail,
-            git_stderr,
-            gh_stderr,
-            recovery,
-        }
-        | ExecutionStatus::PostPrFailure {
-            code,
-            detail,
-            git_stderr,
-            gh_stderr,
-            recovery,
-        } => {
-            if item.reasons.is_empty() {
-                item.reasons = vec![code];
-            }
-            if item.detail.is_none() {
-                item.detail = detail;
-            }
-            if item.git_stderr.is_none() {
-                item.git_stderr = git_stderr;
-            }
-            if item.gh_stderr.is_none() {
-                item.gh_stderr = gh_stderr;
-            }
-            if item.recovery.is_none() {
-                item.recovery = recovery;
-            }
-            return Ok(build_report_with_workflow(
-                &prepared,
-                false,
-                false,
-                actual_minutes,
-                Some(&state),
-            ));
-        }
-    }
-
-    let pr_url = item
-        .pr_url
-        .clone()
-        .ok_or_else(|| anyhow!("gh_pr_create_missing_url"))?;
-    if item.copilot_review.is_none() {
-        emit_progress(progress_requesting_copilot_review());
-        match github.request_pr_review(&pr_url, &config.github.copilot_reviewer) {
-            Ok(()) => item.copilot_review = Some("requested".to_string()),
-            Err(_) => {
-                item.copilot_review = Some("failed".to_string());
-                state.copilot_review_status = Some("failed".to_string());
-                item.reasons.push("gh_pr_review_request_failed".to_string());
-                return Ok(build_report_with_workflow(
-                    &prepared,
-                    false,
-                    false,
-                    actual_minutes,
-                    Some(&state),
-                ));
-            }
-        }
-    }
-    let pr_number = github.pr_number_from_url(&pr_url)?;
-    state.copilot_review_status = Some("requested".to_string());
-
-    emit_progress(progress_waiting_for_copilot_review());
-    let bundle = match github.poll_copilot_review(
-        pr_number,
-        config.review_loop.review_poll_interval_seconds,
-        config.review_loop.review_wait_timeout_minutes,
-    ) {
-        Ok(bundle) => bundle,
-        Err(err) if err.to_string() == "copilot_review_timeout" => {
-            state.copilot_review_status = Some("timeout".to_string());
-            item.reasons.push("copilot_review_timeout".to_string());
-            return Ok(build_report_with_workflow(
-                &prepared,
-                false,
-                false,
-                actual_minutes,
-                Some(&state),
-            ));
-        }
-        Err(err) => return Err(err),
-    };
-
-    state.copilot_review_status = Some("received".to_string());
-    state.review_comments_total = bundle.threads.len() as u32;
-    fs::write(
-        child_run_dir.join("copilot-review.json"),
-        serde_json::to_string_pretty(&bundle.threads)?,
-    )?;
-
-    let fix_prompt = build_review_fix_prompt(
-        &prepared.parent,
-        &child,
-        &estimate,
-        config,
-        &plan_text,
-        &branch_name,
-        &pr_base,
-        &bundle,
-    );
-    emit_progress(progress_applying_review_feedback());
-    let fix_result = agent_exec::run_shell_command(
-        &config.agent.command,
-        &workdir,
+    let result = agent_exec::run_shell_command(
+        &config.agent.plan_command,
+        &config.working_directory(),
         &[(
             "NIGHTLOOP_PROMPT_FILE".to_string(),
-            child_run_dir
-                .join("review-fix-prompt.md")
-                .display()
-                .to_string(),
+            child_run_dir.join("plan-prompt.md").display().to_string(),
         )],
-        CommandRunOptions::streaming("agent").with_stdin(&fix_prompt),
+        CommandRunOptions::streaming("agent").with_stdin(&prompt),
     )?;
-    fs::write(child_run_dir.join("review-fix-prompt.md"), &fix_prompt)?;
-    fs::write(child_run_dir.join("review-fix.stdout"), &fix_result.stdout)?;
-    fs::write(child_run_dir.join("review-fix.stderr"), &fix_result.stderr)?;
-    state.review_fix_rounds = config.review_loop.review_max_fix_rounds.min(1);
+    fs::write(child_run_dir.join("plan-prompt.md"), &prompt)?;
+    fs::write(child_run_dir.join("plan.stdout"), &result.stdout)?;
+    fs::write(child_run_dir.join("plan.stderr"), &result.stderr)?;
+    if !result.success() {
+        bail!("plan_command_failed");
+    }
+    Ok(())
+}
 
-    if !fix_result.success() {
-        item.reasons.push("review_fix_command_failed".to_string());
-        return Ok(build_report_with_workflow(
-            &prepared,
-            false,
-            false,
-            actual_minutes,
-            Some(&state),
+fn run_implementation_phase(
+    config: &Config,
+    child: &ChildIssue,
+    estimate: &IssueEstimate,
+    parent: &ParentIssue,
+    child_run_dir: &Path,
+    single_child: bool,
+) -> Result<()> {
+    let prompt = build_agent_prompt(parent, child, estimate, single_child);
+    let result = agent_exec::run_shell_command(
+        &config.agent.command,
+        &config.working_directory(),
+        &[(
+            "NIGHTLOOP_PROMPT_FILE".to_string(),
+            child_run_dir.join("agent-prompt.md").display().to_string(),
+        )],
+        CommandRunOptions::streaming("agent").with_stdin(&prompt),
+    )?;
+    fs::write(child_run_dir.join("agent-prompt.md"), &prompt)?;
+    fs::write(child_run_dir.join("agent.stdout"), &result.stdout)?;
+    fs::write(child_run_dir.join("agent.stderr"), &result.stderr)?;
+    if !result.success() {
+        bail!("agent_command_failed");
+    }
+    Ok(())
+}
+
+fn run_verification(workdir: &Path, child: &ChildIssue, child_run_dir: &Path) -> Result<()> {
+    let mut transcripts = Vec::new();
+    for (index, command) in child.verification.iter().enumerate() {
+        let result = agent_exec::run_shell_command(
+            &command.command,
+            workdir,
+            &[],
+            CommandRunOptions::streaming("verify"),
+        )?;
+        transcripts.push(format!(
+            "$ {}\n[status={}]\n{}\n{}",
+            command.command, result.status_code, result.stdout, result.stderr
         ));
-    }
-
-    let fix_summary = summarize_review_fix_output(&fix_result.stdout, bundle.threads.len() as u32);
-    state.review_comments_applied = fix_summary.0;
-    state.review_comments_ignored = fix_summary.1;
-    fs::write(
-        child_run_dir.join("review-fix-summary.txt"),
-        format!(
-            "applied={}\nignored={}\n{}",
-            fix_summary.0, fix_summary.1, fix_result.stdout
-        ),
-    )?;
-
-    rerun_verification(config, &child, &workdir, &child_run_dir)?;
-    let diff_stat = git_ops::diff_against(&workdir, &base_sha, &[config.run_root()])?;
-    diff_budget::enforce_diff_budget(config, &child, diff_stat)?;
-    if diff_stat.changed_lines > 0 {
-        git_ops::commit_all(
-            &workdir,
-            &format!(
-                "nightloop: address Copilot review for #{} {}",
-                child.number, child.title
-            ),
+        fs::write(
+            child_run_dir.join(format!("verify-{}.log", index + 1)),
+            transcripts.last().cloned().unwrap_or_default(),
         )?;
-        git_ops::push_current_branch(&workdir, &branch_name)?;
-    }
-    if matches!(item.split_mode.as_deref(), Some("split")) {
-        let state_path = split_state_path(config, prepared.parent.number, child.number);
-        if let Some(mut split_state) = item.split_plan.clone() {
-            split_state.status = SplitPlanStatus::AwaitingMerge;
-            split_state.active_branch = Some(branch_name.clone());
-            split_state.active_pr_url = Some(pr_url.clone());
-            write_split_state(&state_path, &split_state)?;
-            item.split_state = Some(split_state.status.as_str().to_string());
-            item.split_plan = Some(split_state);
-            state.split_state = item.split_state.clone();
+        if !result.success() {
+            bail!("verification_failed");
         }
     }
-
-    telemetry::append_run_record(
-        &config.telemetry_history_path(),
-        &RunRecord {
-            run_id: run_id.clone(),
-            parent_issue: prepared.parent.number,
-            issue_number: child.number,
-            issue_title: child.title.clone(),
-            model_profile: estimate.model_profile.clone(),
-            model: estimate.model.clone(),
-            reasoning_effort: estimate.reasoning_effort.clone(),
-            target_size: child.target_size.clone(),
-            docs_impact: child.docs_impact.clone(),
-            estimated_minutes: estimate.estimated_minutes,
-            actual_minutes,
-            changed_lines: diff_stat.changed_lines,
-            files_touched: diff_stat.files_touched,
-            success: true,
-            status: "success".to_string(),
-            workflow: "review_loop".to_string(),
-            planner_used: true,
-            copilot_review: state.copilot_review_status.clone(),
-            review_comments_total: state.review_comments_total,
-            review_comments_applied: state.review_comments_applied,
-            review_comments_ignored: state.review_comments_ignored,
-            fix_rounds: state.review_fix_rounds,
-            split_mode: item.split_mode.clone(),
-            stage_index: item.stage_index,
-            stage_total: item.stage_total,
-            stage_completed: true,
-            active_pr_url: item.pr_url.clone(),
-            branch: branch_name.clone(),
-            pr_base: pr_base.clone(),
-            pr_url: item.pr_url.clone(),
-            recorded_at: Utc::now(),
-        },
-    )?;
-
-    github.comment_issue(
-        child.number,
-        &format!(
-            "nightloop review loop follow-up\n\n- copilot review status: received\n- review comments total: {}\n- applied comments: {}\n- ignored comments: {}",
-            state.review_comments_total, state.review_comments_applied, state.review_comments_ignored
-        ),
-    )?;
-    github.comment_issue(
-        prepared.parent.number,
-        &format!(
-            "nightloop review loop summary\n\n- child: #{}\n- plan generated: true\n- copilot review: received\n- review fix rounds: 1\n- applied comments: {}\n- ignored comments: {}",
-            child.number, state.review_comments_applied, state.review_comments_ignored
-        ),
-    )?;
-
-    Ok(build_report_with_workflow(
-        &prepared,
-        false,
-        true,
-        actual_minutes,
-        Some(&state),
-    ))
-}
-
-fn prepare_campaign(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    parent_issue_number: u64,
-    hours: u32,
-    target_repo_match: String,
-    flow_mode: FlowMode,
-) -> Result<PreparedCampaign> {
-    let available_minutes = budget::available_minutes(
-        hours,
-        config.loop_cfg.fixed_overhead_minutes,
-        config.loop_cfg.min_hours,
-        config.loop_cfg.max_hours,
-    )?;
-    let parent_snapshot = github.view_issue(parent_issue_number)?;
-    let parent = issue_parse::parse_parent_issue(&parent_snapshot)?;
-
-    let mut issue_snapshots = HashMap::new();
-    for child_ref in &parent.children {
-        issue_snapshots.insert(child_ref.number, github.view_issue(child_ref.number)?);
-    }
-
-    let default_basis = EstimateBasis::from_cli_str(&config.estimation.default_basis)
-        .unwrap_or(EstimateBasis::Hybrid);
-    let mut dependency_done_cache = HashMap::new();
-    for snapshot in issue_snapshots.values() {
-        dependency_done_cache.insert(snapshot.number, issue_done_on_github(snapshot, config));
-    }
-
-    let mut planned_numbers = HashSet::new();
-    let mut estimated_total_minutes = 0u32;
-    let mut issues = Vec::new();
-
-    for child_ref in &parent.children {
-        let snapshot = issue_snapshots
-            .get(&child_ref.number)
-            .cloned()
-            .ok_or_else(|| anyhow!("missing fetched child issue {}", child_ref.number))?;
-        let lint = issue_lint::lint_child_issue(config, &snapshot);
-        let mut prepared = PreparedIssue {
-            snapshot: snapshot.clone(),
-            child: lint.child,
-            estimate: None,
-            reasons: Vec::new(),
-            lint_findings: lint.findings.clone(),
-            status: "skipped".to_string(),
-            actual_minutes: None,
-            branch: None,
-            pr_url: None,
-            copilot_review: if config.github.request_copilot_review {
-                Some("skipped".to_string())
-            } else {
-                None
-            },
-            detail: None,
-            git_stderr: None,
-            gh_stderr: None,
-            recovery: None,
-            repairs: Vec::new(),
-            split_mode: None,
-            stage_index: None,
-            stage_total: None,
-            split_state: None,
-            split_plan: None,
-        };
-
-        if !lint.valid {
-            prepared.reasons = lint
-                .findings
-                .iter()
-                .map(|finding| finding.code.clone())
-                .collect();
-            issues.push(prepared);
-            continue;
-        }
-
-        let child = prepared
-            .child
-            .clone()
-            .ok_or_else(|| anyhow!("valid lint report missing parsed child"))?;
-        prepared.estimate = Some(estimate::estimate_child_issue(
-            config,
-            &child,
-            default_basis,
-        )?);
-        prepared.reasons = selection::static_eligibility_reasons(config, &child);
-        let reasons = prepared.reasons.clone();
-        planned_issue_repairs(&reasons, &mut prepared);
-        apply_split_state_annotations(
-            config,
-            github,
-            parent.number,
-            &child,
-            &mut prepared,
-            flow_mode.clone(),
-        )?;
-
-        if prepared.reasons.is_empty()
-            && !dependencies_satisfied_live(
-                &child,
-                &issue_snapshots,
-                &mut dependency_done_cache,
-                github,
-                config,
-                &planned_numbers,
-            )?
-        {
-            prepared.reasons.push("dependency_unsatisfied".to_string());
-        }
-
-        if prepared.reasons.is_empty() {
-            let minutes = prepared
-                .estimate
-                .as_ref()
-                .map(|estimate| estimate.estimated_minutes)
-                .unwrap_or_default();
-            if selection::pack_issue_if_fit(minutes, estimated_total_minutes, available_minutes) {
-                prepared.status = "selected".to_string();
-                estimated_total_minutes += minutes;
-                planned_numbers.insert(child.number);
-            } else {
-                prepared.reasons.push("budget_exhausted".to_string());
-            }
-        }
-
-        issues.push(prepared);
-    }
-
-    let remaining_minutes = available_minutes.saturating_sub(estimated_total_minutes);
-    Ok(PreparedCampaign {
-        parent,
-        issues,
-        issue_snapshots,
-        dependency_done_cache,
-        estimated_total_minutes,
-        remaining_minutes,
-        hours,
-        target_repo_match,
-        target_repo_root: config.target_repo_root().display().to_string(),
-        run_root: config.run_root().display().to_string(),
-        detail: None,
-        git_stderr: None,
-        gh_stderr: None,
-        recovery: None,
-        repair_lines: Vec::new(),
-        labels_repaired: 0,
-        issues_repaired: 0,
-        branches_repaired: 0,
-    })
-}
-
-fn dependencies_satisfied_live(
-    child: &ChildIssue,
-    issue_snapshots: &HashMap<u64, IssueSnapshot>,
-    dependency_done_cache: &mut HashMap<u64, bool>,
-    github: &GitHubClient<'_>,
-    config: &Config,
-    planned_or_completed: &HashSet<u64>,
-) -> Result<bool> {
-    let done_from_known = dependency_numbers_done(issue_snapshots, config);
-    if selection::dependencies_satisfied(child, &done_from_known, planned_or_completed) {
-        return Ok(true);
-    }
-
-    for dependency in &child.dependencies {
-        if planned_or_completed.contains(dependency) {
-            continue;
-        }
-        if let Some(done) = dependency_done_cache.get(dependency) {
-            if *done {
-                continue;
-            }
-            return Ok(false);
-        }
-        let snapshot = github.view_issue(*dependency)?;
-        let done = issue_done_on_github(&snapshot, config);
-        dependency_done_cache.insert(*dependency, done);
-        if !done {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn dependency_numbers_done(
-    issue_snapshots: &HashMap<u64, IssueSnapshot>,
-    config: &Config,
-) -> HashSet<u64> {
-    issue_snapshots
-        .values()
-        .filter(|snapshot| issue_done_on_github(snapshot, config))
-        .map(|snapshot| snapshot.number)
-        .collect()
-}
-
-fn issue_done_on_github(snapshot: &IssueSnapshot, config: &Config) -> bool {
-    snapshot.state.as_str() == "closed" || snapshot.has_label(&config.labels.done)
-}
-
-fn finalize_failure(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    parent_issue: u64,
-    run_id: &str,
-    branch_name: &str,
-    pr_base: &str,
-    failure_code: &str,
-    diff_stat: DiffStat,
-    actual_minutes: u32,
-) -> Result<()> {
-    github.remove_labels(child.number, &[&config.labels.running])?;
-    github.add_labels(child.number, &[&config.labels.blocked])?;
-    github.comment_issue(
-        child.number,
-        &format!(
-            "nightloop failure\n\n- reason: `{}`\n- branch: `{}`\n- actual minutes: {}\n- changed lines: {}",
-            failure_code, branch_name, actual_minutes, diff_stat.changed_lines
-        ),
-    )?;
-
-    telemetry::append_run_record(
-        &config.telemetry_history_path(),
-        &RunRecord {
-            run_id: run_id.to_string(),
-            parent_issue,
-            issue_number: child.number,
-            issue_title: child.title.clone(),
-            model_profile: estimate.model_profile.clone(),
-            model: estimate.model.clone(),
-            reasoning_effort: estimate.reasoning_effort.clone(),
-            target_size: child.target_size.clone(),
-            docs_impact: child.docs_impact.clone(),
-            estimated_minutes: estimate.estimated_minutes,
-            actual_minutes,
-            changed_lines: diff_stat.changed_lines,
-            files_touched: diff_stat.files_touched,
-            success: false,
-            status: failure_code.to_string(),
-            workflow: "run".to_string(),
-            planner_used: false,
-            copilot_review: None,
-            review_comments_total: 0,
-            review_comments_applied: 0,
-            review_comments_ignored: 0,
-            fix_rounds: 0,
-            split_mode: None,
-            stage_index: None,
-            stage_total: None,
-            stage_completed: false,
-            active_pr_url: None,
-            branch: branch_name.to_string(),
-            pr_base: pr_base.to_string(),
-            pr_url: None,
-            recorded_at: Utc::now(),
-        },
-    )?;
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finalize_split_required(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    parent_issue: u64,
-    run_id: &str,
-    branch_name: &str,
-    pr_base: &str,
-    diff_stat: DiffStat,
-    actual_minutes: u32,
-    workflow: String,
-) -> Result<()> {
-    github.remove_labels(child.number, &[&config.labels.running])?;
-    github.add_labels(child.number, &[&config.labels.ready])?;
-    github.comment_issue(
-        child.number,
-        &format!(
-            "nightloop split required\n\n- branch: `{}`\n- actual minutes: {}\n- changed lines: {}\n- recovery: `run_start_for_staged_split`",
-            branch_name, actual_minutes, diff_stat.changed_lines
-        ),
-    )?;
-    telemetry::append_run_record(
-        &config.telemetry_history_path(),
-        &RunRecord {
-            run_id: run_id.to_string(),
-            parent_issue,
-            issue_number: child.number,
-            issue_title: child.title.clone(),
-            model_profile: estimate.model_profile.clone(),
-            model: estimate.model.clone(),
-            reasoning_effort: estimate.reasoning_effort.clone(),
-            target_size: child.target_size.clone(),
-            docs_impact: child.docs_impact.clone(),
-            estimated_minutes: estimate.estimated_minutes,
-            actual_minutes,
-            changed_lines: diff_stat.changed_lines,
-            files_touched: diff_stat.files_touched,
-            success: false,
-            status: "split_required".to_string(),
-            workflow,
-            planner_used: false,
-            copilot_review: None,
-            review_comments_total: 0,
-            review_comments_applied: 0,
-            review_comments_ignored: 0,
-            fix_rounds: 0,
-            split_mode: Some("split".to_string()),
-            stage_index: None,
-            stage_total: None,
-            stage_completed: false,
-            active_pr_url: None,
-            branch: branch_name.to_string(),
-            pr_base: pr_base.to_string(),
-            pr_url: None,
-            recorded_at: Utc::now(),
-        },
-    )?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finalize_split_plan_outdated(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    parent_issue: u64,
-    run_id: &str,
-    branch_name: &str,
-    pr_base: &str,
-    diff_stat: DiffStat,
-    actual_minutes: u32,
-    split_state: &Path,
-) -> Result<()> {
-    github.remove_labels(child.number, &[&config.labels.running])?;
-    github.add_labels(child.number, &[&config.labels.ready])?;
-    remove_split_state(split_state)?;
-    github.comment_issue(
-        child.number,
-        &format!(
-            "nightloop split plan outdated\n\n- branch: `{}`\n- actual minutes: {}\n- changed lines: {}\n- recovery: `use_start_with_staged_split`",
-            branch_name, actual_minutes, diff_stat.changed_lines
-        ),
-    )?;
-    telemetry::append_run_record(
-        &config.telemetry_history_path(),
-        &RunRecord {
-            run_id: run_id.to_string(),
-            parent_issue,
-            issue_number: child.number,
-            issue_title: child.title.clone(),
-            model_profile: estimate.model_profile.clone(),
-            model: estimate.model.clone(),
-            reasoning_effort: estimate.reasoning_effort.clone(),
-            target_size: child.target_size.clone(),
-            docs_impact: child.docs_impact.clone(),
-            estimated_minutes: estimate.estimated_minutes,
-            actual_minutes,
-            changed_lines: diff_stat.changed_lines,
-            files_touched: diff_stat.files_touched,
-            success: false,
-            status: "split_plan_outdated".to_string(),
-            workflow: "review_loop".to_string(),
-            planner_used: true,
-            copilot_review: None,
-            review_comments_total: 0,
-            review_comments_applied: 0,
-            review_comments_ignored: 0,
-            fix_rounds: 0,
-            split_mode: Some("split".to_string()),
-            stage_index: None,
-            stage_total: None,
-            stage_completed: false,
-            active_pr_url: None,
-            branch: branch_name.to_string(),
-            pr_base: pr_base.to_string(),
-            pr_url: None,
-            recorded_at: Utc::now(),
-        },
-    )?;
+fn enforce_diff_budget(child: &ChildIssue, diff_stat: &DiffStat, config: &Config) -> Result<()> {
+    let changed_lines = diff_stat.changed_lines;
+    if changed_lines > child.target_size.max_lines() || changed_lines > config.diff.max_lines {
+        bail!("split_required");
+    }
+    if changed_lines < config.diff.min_lines
+        && !(config.diff.allow_doc_only_below_min && child.allows_small_diff_exception())
+    {
+        bail!("diff_below_min");
+    }
     Ok(())
 }
 
@@ -1392,400 +534,100 @@ fn build_agent_prompt(
     parent: &ParentIssue,
     child: &ChildIssue,
     estimate: &IssueEstimate,
-    config: &Config,
+    single_child: bool,
 ) -> String {
-    let verification = child
-        .verification
-        .iter()
-        .map(|command| format!("- {}", command.command))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let docs_note = if child.docs_impact.as_str() == "none" {
-        "Documentation impact: none".to_string()
-    } else {
-        format!(
-            "Documentation impact: {}. Update the required docs in the same branch.",
-            child.docs_impact.as_str()
-        )
-    };
-
     format!(
-        "Implement GitHub child issue #{} from parent campaign #{}.\n\n\
-Read AGENTS.md and the listed source-of-truth refs before changing code.\n\
-Keep the diff reviewable and within the declared target change size.\n\
-Do not widen scope.\n\
-\n\
-Parent issue: #{} {}\n\
-Child issue: #{} {}\n\
-Suggested model profile: {}\n\
-Exact model: {}\n\
-Reasoning effort: {}\n\
-Target change size: {}\n\
-{}\n\
-\n\
-Background:\n{}\n\
-\n\
-Goal:\n{}\n\
-\n\
-Scope:\n{}\n\
-\n\
-Out of scope:\n{}\n\
-\n\
-Source of truth:\n{}\n\
-\n\
-Acceptance criteria:\n{}\n\
-\n\
-Verification:\n{}\n\
-\n\
-Implementation constraints:\n{}\n\
-\n\
-Repository guidance:\n- Working directory: {}\n- Base branch: {}\n",
-        child.number,
-        parent.number,
+        "Parent issue: #{} {}\nChild issue: #{} {}\nWorkflow: {}\nModel profile: {}\nEstimated minutes: {}\n\nImplement only the child issue scope. Run the declared verification commands before finishing.\n\nIssue body:\n{}\n",
         parent.number,
         parent.title,
         child.number,
         child.title,
+        if single_child { "start" } else { "nightly" },
         estimate.model_profile,
-        estimate.model,
-        estimate.reasoning_effort,
-        child.target_size.as_str(),
-        docs_note,
-        child.background,
-        child.goal,
-        child.scope,
-        child.out_of_scope,
-        child.source_of_truth_raw,
-        child.acceptance_criteria,
-        verification,
-        child
-            .implementation_constraints
-            .clone()
-            .unwrap_or_else(|| "none".to_string()),
-        config.working_directory().display(),
-        config.github.base_branch
+        estimate.estimated_minutes,
+        child.body
     )
 }
 
-fn build_parent_summary(
-    prepared: &PreparedCampaign,
-    hours: u32,
-    estimated_total_minutes: u32,
-    actual_total_minutes: u32,
+fn build_pr_body(
+    parent: &ParentIssue,
+    child: &ChildIssue,
+    estimate: &IssueEstimate,
+    single_child: bool,
 ) -> String {
-    let selected = prepared
+    format!(
+        "## Summary\n- Parent issue: #{}\n- Child issue: #{}\n- Workflow: {}\n- Model profile: {}\n- Estimated minutes: {}\n",
+        parent.number,
+        child.number,
+        if single_child { "start" } else { "nightly" },
+        estimate.model_profile,
+        estimate.estimated_minutes
+    )
+}
+
+fn build_parent_summary(prepared: &PreparedCampaign, single_child: bool) -> String {
+    let succeeded = prepared
         .issues
         .iter()
-        .filter(|item| {
-            item.status == "selected" || item.status == "completed" || item.status == "blocked"
-        })
+        .filter(|item| item.status == "success")
         .map(|item| format!("#{}", item.snapshot.number))
         .collect::<Vec<_>>();
-    let completed = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "completed")
-        .map(|item| match &item.pr_url {
-            Some(pr_url) => format!("#{} ({})", item.snapshot.number, pr_url),
-            None => format!("#{}", item.snapshot.number),
-        })
-        .collect::<Vec<_>>();
-    let blocked = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "blocked")
-        .map(|item| format!("#{} ({})", item.snapshot.number, item.reasons.join(",")))
-        .collect::<Vec<_>>();
-    let skipped = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "skipped")
-        .map(|item| format!("#{} ({})", item.snapshot.number, item.reasons.join(",")))
-        .collect::<Vec<_>>();
-    let pr_chain = prepared
-        .issues
-        .iter()
-        .filter_map(|item| {
-            item.pr_url
-                .as_ref()
-                .map(|url| format!("#{} -> {}", item.snapshot.number, url))
-        })
-        .collect::<Vec<_>>();
-    let copilot_reviews = prepared
-        .issues
-        .iter()
-        .filter_map(|item| {
-            item.copilot_review
-                .as_ref()
-                .and_then(|status| match status.as_str() {
-                    "requested" | "failed" => {
-                        Some(format!("#{} ({})", item.snapshot.number, status))
-                    }
-                    _ => None,
-                })
-        })
-        .collect::<Vec<_>>();
-    let mut summary = format!(
-        "nightloop parent summary\n\n- Hours: {}\n- Selected children: {}\n- Completed children: {}\n- Blocked children: {}\n- Skipped children: {}\n- PR chain: {}",
-        hours,
-        join_for_comment(&selected),
-        join_for_comment(&completed),
-        join_for_comment(&blocked),
-        join_for_comment(&skipped),
-        join_for_comment(&pr_chain),
-    );
-    if prepared
-        .issues
-        .iter()
-        .any(|item| item.copilot_review.is_some())
-    {
-        summary.push_str(&format!(
-            "\n- Copilot reviews: {}",
-            join_for_comment(&copilot_reviews)
-        ));
-    }
-    summary.push_str(&format!(
-        "\n- Estimated minutes: {}\n- Actual minutes: {}",
-        estimated_total_minutes, actual_total_minutes
-    ));
-    summary
-}
-
-fn branch_name_for_stage(
-    parent_issue: u64,
-    child_issue: u64,
-    split_mode: Option<&str>,
-    stage_index: Option<u32>,
-) -> String {
-    if matches!(split_mode, Some("split")) {
-        let stage_index = stage_index.unwrap_or(1);
-        format!(
-            "nightloop/{}-{}-s{}",
-            parent_issue, child_issue, stage_index
-        )
-    } else {
-        format!("nightloop/{}-{}", parent_issue, child_issue)
-    }
-}
-
-fn expected_branch_name(prepared: &PreparedCampaign, issue_number: u64) -> String {
-    let item = prepared
-        .issues
-        .iter()
-        .find(|item| item.snapshot.number == issue_number);
-    branch_name_for_stage(
-        prepared.parent.number,
-        issue_number,
-        item.and_then(|item| item.split_mode.as_deref()),
-        item.and_then(|item| item.stage_index),
-    )
-}
-
-fn progress_planning_child(issue_number: u64) -> String {
-    format!("planning child #{issue_number}")
-}
-
-fn progress_implementing_branch(branch: &str) -> String {
-    format!("implementing branch {branch}")
-}
-
-fn progress_requesting_copilot_review() -> String {
-    "requesting copilot review".to_string()
-}
-
-fn progress_waiting_for_copilot_review() -> String {
-    "waiting for copilot review".to_string()
-}
-
-fn progress_applying_review_feedback() -> String {
-    "applying review feedback".to_string()
-}
-
-fn emit_progress(message: String) {
-    reporting::print_progress(&message);
-}
-
-fn build_nightly_progress_lines(prepared: &PreparedCampaign, dry_run: bool) -> Vec<String> {
-    let mut lines = Vec::new();
-    for item in &prepared.issues {
-        let is_active =
-            item.status == "selected" || item.status == "completed" || item.status == "blocked";
-        if !is_active {
-            continue;
-        }
-        let branch = item
-            .branch
-            .clone()
-            .unwrap_or_else(|| expected_branch_name(prepared, item.snapshot.number));
-        if dry_run {
-            lines.push(format!("would {}", progress_implementing_branch(&branch)));
-        }
-    }
-    lines
-}
-
-fn build_review_loop_progress_lines(
-    prepared: &PreparedCampaign,
-    dry_run: bool,
-    workflow: &ReviewLoopState,
-) -> Vec<String> {
-    let Some(issue_number) = workflow.selected_child_issue else {
-        return Vec::new();
-    };
-    let branch = prepared
-        .issues
-        .iter()
-        .find(|item| item.snapshot.number == issue_number)
-        .and_then(|item| item.branch.clone())
-        .unwrap_or_else(|| expected_branch_name(prepared, issue_number));
-
-    if dry_run {
-        return vec![
-            format!("would {}", progress_planning_child(issue_number)),
-            format!("would {}", progress_implementing_branch(&branch)),
-            format!("would {}", progress_requesting_copilot_review()),
-            format!("would {}", progress_waiting_for_copilot_review()),
-            format!("would {}", progress_applying_review_feedback()),
-        ];
-    }
-
-    let mut lines = vec![progress_planning_child(issue_number)];
-    let item = prepared
-        .issues
-        .iter()
-        .find(|item| item.snapshot.number == issue_number);
-    let planner_failed = item
-        .map(|item| {
-            item.reasons
-                .iter()
-                .any(|reason| reason == "plan_command_failed")
-        })
-        .unwrap_or(false);
-    if !planner_failed {
-        lines.push(progress_implementing_branch(&branch));
-    }
-    if matches!(
-        workflow.copilot_review_status.as_deref(),
-        Some("requested" | "received" | "timeout" | "failed")
-    ) || item.and_then(|item| item.pr_url.as_ref()).is_some()
-    {
-        lines.push(progress_requesting_copilot_review());
-    }
-    if matches!(
-        workflow.copilot_review_status.as_deref(),
-        Some("received" | "timeout")
-    ) {
-        lines.push(progress_waiting_for_copilot_review());
-    }
-    if workflow.review_fix_rounds > 0
-        || item
-            .map(|item| {
-                item.reasons
-                    .iter()
-                    .any(|reason| reason == "review_fix_command_failed")
-            })
-            .unwrap_or(false)
-    {
-        lines.push(progress_applying_review_feedback());
-    }
-    lines
-}
-
-fn build_report(
-    prepared: &PreparedCampaign,
-    dry_run: bool,
-    ok: bool,
-    actual_total_minutes: u32,
-) -> RunReport {
-    let selected_count = prepared
+    let failed = prepared
         .issues
         .iter()
         .filter(|item| {
-            item.status == "selected" || item.status == "completed" || item.status == "blocked"
+            item.status != "success" && item.status != "selected" && !item.reasons.is_empty()
         })
-        .count();
-    let completed_count = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "completed")
-        .count();
-    let blocked_count = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "blocked")
-        .count();
-    let skipped_count = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "skipped")
-        .count();
+        .map(|item| format!("#{} ({})", item.snapshot.number, item.reasons.join(",")))
+        .collect::<Vec<_>>();
 
+    format!(
+        "nightloop {} summary\n\n- succeeded: {}\n- deferred: {}\n",
+        if single_child { "start" } else { "nightly" },
+        if succeeded.is_empty() {
+            "none".to_string()
+        } else {
+            succeeded.join(", ")
+        },
+        if failed.is_empty() {
+            "none".to_string()
+        } else {
+            failed.join(", ")
+        }
+    )
+}
+
+fn build_report(prepared: &PreparedCampaign, dry_run: bool) -> RunReport {
     let mut lines = vec![vec![
+        (
+            "ok".to_string(),
+            prepared
+                .issues
+                .iter()
+                .all(|item| !matches!(item.status.as_str(), "blocked" | "split_required"))
+                .to_string(),
+        ),
         (
             "parent_issue".to_string(),
             prepared.parent.number.to_string(),
         ),
-        ("hours".to_string(), prepared.hours.to_string()),
-        ("dry_run".to_string(), dry_run.to_string()),
-        ("selected_count".to_string(), selected_count.to_string()),
-        ("completed_count".to_string(), completed_count.to_string()),
-        ("blocked_count".to_string(), blocked_count.to_string()),
-        ("skipped_count".to_string(), skipped_count.to_string()),
-        (
-            "estimated_total_minutes".to_string(),
-            prepared.estimated_total_minutes.to_string(),
-        ),
-        (
-            "remaining_minutes".to_string(),
-            prepared.remaining_minutes.to_string(),
-        ),
-        (
-            "actual_total_minutes".to_string(),
-            actual_total_minutes.to_string(),
-        ),
-        (
-            "target_repo_root".to_string(),
-            prepared.target_repo_root.clone(),
-        ),
-        ("run_root".to_string(), prepared.run_root.clone()),
         (
             "target_repo_match".to_string(),
             prepared.target_repo_match.clone(),
         ),
         (
-            "labels_repaired".to_string(),
-            prepared.labels_repaired.to_string(),
+            "available_minutes".to_string(),
+            prepared.available_minutes.to_string(),
         ),
         (
-            "issues_repaired".to_string(),
-            prepared.issues_repaired.to_string(),
+            "estimated_total_minutes".to_string(),
+            prepared.estimated_total_minutes.to_string(),
         ),
-        (
-            "branches_repaired".to_string(),
-            prepared.branches_repaired.to_string(),
-        ),
+        ("run_root".to_string(), prepared.run_root.clone()),
+        ("dry_run".to_string(), dry_run.to_string()),
     ]];
-    if let Some(detail) = &prepared.detail {
-        lines[0].push(("detail".to_string(), detail.clone()));
-    }
-    if let Some(git_stderr) = &prepared.git_stderr {
-        lines[0].push(("git_stderr".to_string(), git_stderr.clone()));
-    }
-    if let Some(gh_stderr) = &prepared.gh_stderr {
-        lines[0].push(("gh_stderr".to_string(), gh_stderr.clone()));
-    }
-    if let Some(recovery) = &prepared.recovery {
-        lines[0].push(("recovery".to_string(), recovery.clone()));
-    }
-    lines.extend(prepared.repair_lines.iter().cloned());
 
     for item in &prepared.issues {
-        let repair_lines = if dry_run {
-            item.render_dry_run_repair_lines()
-        } else {
-            item.render_real_repair_lines()
-        };
-        lines.extend(repair_lines);
         let mut line = vec![
             ("child_issue".to_string(), item.snapshot.number.to_string()),
             ("status".to_string(), item.status.clone()),
@@ -1795,20 +637,6 @@ fn build_report(
                 "estimated_minutes".to_string(),
                 estimate.estimated_minutes.to_string(),
             ));
-            line.push(("basis_used".to_string(), estimate.basis_used.clone()));
-        }
-        if !item.lint_findings.is_empty() && item.status == "skipped" && item.child.is_none() {
-            line.push((
-                "lint_findings".to_string(),
-                item.lint_findings
-                    .iter()
-                    .map(|finding| finding.code.clone())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ));
-        }
-        if let Some(actual_minutes) = item.actual_minutes {
-            line.push(("actual_minutes".to_string(), actual_minutes.to_string()));
         }
         if !item.reasons.is_empty() {
             line.push(("reasons".to_string(), item.reasons.join(",")));
@@ -1816,1554 +644,112 @@ fn build_report(
         if let Some(detail) = &item.detail {
             line.push(("detail".to_string(), detail.clone()));
         }
-        if let Some(split_mode) = &item.split_mode {
-            line.push(("split_mode".to_string(), split_mode.clone()));
-        }
-        if let Some(stage_index) = item.stage_index {
-            line.push(("stage_index".to_string(), stage_index.to_string()));
-        }
-        if let Some(stage_total) = item.stage_total {
-            line.push(("stage_total".to_string(), stage_total.to_string()));
-        }
-        if let Some(split_state) = &item.split_state {
-            line.push(("split_state".to_string(), split_state.clone()));
-        }
-        if let Some(git_stderr) = &item.git_stderr {
-            line.push(("git_stderr".to_string(), git_stderr.clone()));
-        }
-        if let Some(gh_stderr) = &item.gh_stderr {
-            line.push(("gh_stderr".to_string(), gh_stderr.clone()));
-        }
-        if let Some(recovery) = &item.recovery {
-            line.push(("recovery".to_string(), recovery.clone()));
-        }
         if let Some(branch) = &item.branch {
             line.push(("branch".to_string(), branch.clone()));
+        }
+        if let Some(pr_base) = &item.pr_base {
+            line.push(("pr_base".to_string(), pr_base.clone()));
         }
         if let Some(pr_url) = &item.pr_url {
             line.push(("pr_url".to_string(), pr_url.clone()));
         }
-        if let Some(copilot_review) = &item.copilot_review {
-            line.push(("copilot_review".to_string(), copilot_review.clone()));
+        if let Some(actual_minutes) = item.actual_minutes {
+            line.push(("actual_minutes".to_string(), actual_minutes.to_string()));
+        }
+        if let Some(changed_lines) = item.changed_lines {
+            line.push(("changed_lines".to_string(), changed_lines.to_string()));
         }
         lines.push(line);
     }
 
     RunReport {
-        ok,
-        lines,
-        progress_lines: if dry_run {
-            build_nightly_progress_lines(prepared, dry_run)
-        } else {
-            Vec::new()
-        },
-    }
-}
-
-fn build_report_with_workflow(
-    prepared: &PreparedCampaign,
-    dry_run: bool,
-    ok: bool,
-    actual_total_minutes: u32,
-    workflow: Option<&ReviewLoopState>,
-) -> RunReport {
-    let mut report = build_report(prepared, dry_run, ok, actual_total_minutes);
-    if let Some(workflow) = workflow {
-        report.lines[0].push(("workflow".to_string(), workflow.workflow.clone()));
-        if let Some(issue) = workflow.selected_child_issue {
-            report.lines[0].push(("selected_child_issue".to_string(), issue.to_string()));
-        }
-        report.lines[0].push((
-            "plan_generated".to_string(),
-            workflow.plan_generated.to_string(),
-        ));
-        if let Some(status) = &workflow.copilot_review_status {
-            report.lines[0].push(("copilot_review".to_string(), status.clone()));
-        }
-        report.lines[0].push((
-            "review_fix_rounds".to_string(),
-            workflow.review_fix_rounds.to_string(),
-        ));
-        report.lines[0].push((
-            "review_comments_total".to_string(),
-            workflow.review_comments_total.to_string(),
-        ));
-        report.lines[0].push((
-            "review_comments_applied".to_string(),
-            workflow.review_comments_applied.to_string(),
-        ));
-        report.lines[0].push((
-            "review_comments_ignored".to_string(),
-            workflow.review_comments_ignored.to_string(),
-        ));
-        if let Some(split_mode) = &workflow.split_mode {
-            report.lines[0].push(("split_mode".to_string(), split_mode.clone()));
-        }
-        if let Some(stage_index) = workflow.stage_index {
-            report.lines[0].push(("stage_index".to_string(), stage_index.to_string()));
-        }
-        if let Some(stage_total) = workflow.stage_total {
-            report.lines[0].push(("stage_total".to_string(), stage_total.to_string()));
-        }
-        if let Some(split_state) = &workflow.split_state {
-            report.lines[0].push(("split_state".to_string(), split_state.clone()));
-        }
-        report.progress_lines = if dry_run {
-            build_review_loop_progress_lines(prepared, dry_run, workflow)
-        } else {
-            Vec::new()
-        };
-    }
-    report
-}
-
-fn annotate_review_loop_dry_run(prepared: &mut PreparedCampaign, state: &mut ReviewLoopState) {
-    if let Some(issue_number) = state.selected_child_issue {
-        if let Some(item) = prepared
+        ok: prepared
             .issues
             .iter()
-            .find(|item| item.snapshot.number == issue_number)
-        {
-            state.split_mode = item.split_mode.clone();
-            state.stage_index = item.stage_index;
-            state.stage_total = item.stage_total;
-            state.split_state = item.split_state.clone();
-        }
+            .all(|item| !matches!(item.status.as_str(), "blocked" | "split_required")),
+        lines,
+        progress_lines: Vec::new(),
     }
 }
 
-fn limit_to_first_selected(prepared: &mut PreparedCampaign) {
-    let mut seen = false;
-    for item in &mut prepared.issues {
-        if item.status == "selected" && !seen {
-            seen = true;
-            continue;
-        }
-        if item.status == "selected" {
-            item.status = "skipped".to_string();
-            item.reasons = vec!["review_loop_single_child_only".to_string()];
-        }
-    }
-    prepared.estimated_total_minutes = prepared
-        .issues
-        .iter()
-        .filter(|item| item.status == "selected")
-        .filter_map(|item| {
-            item.estimate
-                .as_ref()
-                .map(|estimate| estimate.estimated_minutes)
-        })
-        .sum();
-}
-
-fn first_selected_issue(prepared: &PreparedCampaign) -> Option<u64> {
-    prepared
-        .issues
-        .iter()
-        .find(|item| item.status == "selected")
-        .map(|item| item.snapshot.number)
-}
-
-fn build_plan_prompt(
-    parent: &ParentIssue,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    config: &Config,
-) -> String {
-    format!(
-        "Create a concise staged implementation plan for GitHub child issue #{} from parent campaign #{}.\n\nYour response must begin with a JSON object and nothing before it. Use this schema exactly:\n{{\n  \"mode\": \"single | split\",\n  \"summary\": \"string\",\n  \"stages\": [\n    {{\n      \"index\": 1,\n      \"title\": \"string\",\n      \"goal\": \"string\",\n      \"boundary\": \"string\",\n      \"acceptance_subset\": [\"string\"],\n      \"estimated_changed_lines\": 250\n    }}\n  ]\n}}\n\nRules:\n- Use `single` only when one reviewable PR can stay within the child target size.\n- Use `split` when the work should be delivered as sequential stage PRs.\n- Each stage must be independently reviewable.\n- `estimated_changed_lines` for every stage must stay within the child target size maximum.\n- After the JSON object, include a short markdown explanation.\n\nParent issue: #{} {}\nChild issue: #{} {}\nSuggested model profile: {}\nExact model: {}\nReasoning effort: {}\nTarget change size: {}\n\nBackground:\n{}\n\nGoal:\n{}\n\nScope:\n{}\n\nOut of scope:\n{}\n\nSource of truth:\n{}\n\nAcceptance criteria:\n{}\n\nVerification:\n{}\n\nReturn a practical implementation plan in markdown after the JSON object.",
-        child.number,
-        parent.number,
-        parent.number,
-        parent.title,
-        child.number,
-        child.title,
-        estimate.model_profile,
-        estimate.model,
-        estimate.reasoning_effort,
-        child.target_size.as_str(),
-        child.background,
-        child.goal,
-        child.scope,
-        child.out_of_scope,
-        child.source_of_truth_raw,
-        child.acceptance_criteria,
-        child
-            .verification
-            .iter()
-            .map(|command| command.command.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    ) + &format!(
-        "\n\nRepository guidance:\n- Working directory: {}\n- Base branch: {}",
-        config.working_directory().display(),
-        config.github.base_branch
-    )
-}
-
-fn apply_planner_prompt_prefix(config: &Config, prompt: &str) -> String {
-    let prefix = config.review_loop.planner_prompt_prefix.trim();
-    if prefix.is_empty() {
-        prompt.to_string()
-    } else {
-        format!("{prefix}\n\n{prompt}")
-    }
-}
-
-fn split_state_path(config: &Config, parent_issue: u64, child_issue: u64) -> PathBuf {
-    config
-        .split_state_root()
-        .join(format!("{}-{}.json", parent_issue, child_issue))
-}
-
-fn load_split_state(path: &Path) -> Result<Option<SplitStateRecord>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(path)?;
-    Ok(Some(serde_json::from_str::<SplitStateRecord>(&raw)?))
-}
-
-fn write_split_state(path: &Path, state: &SplitStateRecord) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, serde_json::to_string_pretty(state)?)?;
+fn ensure_minimal_safe_repairs(config: &Config, github: &GitHubClient<'_>) -> Result<()> {
+    github.ensure_managed_labels()?;
+    let workdir = config.working_directory();
+    git_ops::ensure_git_worktree(&workdir)?;
     Ok(())
 }
 
-fn remove_split_state(path: &Path) -> Result<()> {
-    if path.exists() {
-        fs::remove_file(path)?;
+fn prepare_branch(workdir: &Path, branch_name: &str, start_point: &str) -> Result<()> {
+    if git_ops::local_branch_exists(workdir, branch_name)? {
+        git_ops::delete_local_branch(workdir, branch_name, start_point)?;
     }
-    Ok(())
-}
-
-fn current_split_stage(state: &SplitStateRecord) -> Option<&SplitStateStage> {
-    state
-        .stages
-        .iter()
-        .find(|stage| stage.index == state.current_stage)
-}
-
-fn extract_structured_plan(
-    raw_output: &str,
-    child: &ChildIssue,
-    config: &Config,
-) -> Result<StructuredPlan> {
-    let trimmed = raw_output.trim_start();
-    if !trimmed.starts_with('{') {
-        anyhow::bail!("plan_parse_failed");
-    }
-    let mut de = serde_json::Deserializer::from_str(trimmed);
-    let value =
-        serde_json::Value::deserialize(&mut de).map_err(|_| anyhow!("plan_parse_failed"))?;
-    let plan = serde_json::from_value::<StructuredPlan>(value)
-        .map_err(|_| anyhow!("plan_parse_failed"))?;
-    validate_structured_plan(&plan, child, config)?;
-    Ok(plan)
-}
-
-fn validate_structured_plan(
-    plan: &StructuredPlan,
-    child: &ChildIssue,
-    config: &Config,
-) -> Result<()> {
-    if plan.summary.trim().is_empty() {
-        anyhow::bail!("plan_parse_failed");
-    }
-    let total = plan.stages.len() as u32;
-    match plan.mode {
-        StructuredPlanMode::Single => {
-            if total != 1 {
-                anyhow::bail!("plan_parse_failed");
-            }
-        }
-        StructuredPlanMode::Split => {
-            if !config.review_loop.auto_split_stages {
-                anyhow::bail!("plan_parse_failed");
-            }
-            if total < 2 || total > config.review_loop.max_split_stages {
-                anyhow::bail!("plan_parse_failed");
-            }
-        }
-    }
-
-    for (expected, stage) in plan.stages.iter().enumerate() {
-        if stage.index != (expected as u32) + 1
-            || stage.title.trim().is_empty()
-            || stage.goal.trim().is_empty()
-            || stage.boundary.trim().is_empty()
-            || stage.acceptance_subset.is_empty()
-            || stage
-                .acceptance_subset
-                .iter()
-                .any(|item| item.trim().is_empty())
-            || stage.estimated_changed_lines == 0
-            || stage.estimated_changed_lines > child.target_size.max_lines()
-        {
-            anyhow::bail!("plan_parse_failed");
-        }
-    }
-
-    Ok(())
-}
-
-fn split_state_from_plan(
-    parent_issue: u64,
-    child_issue: u64,
-    plan: &StructuredPlan,
-) -> SplitStateRecord {
-    SplitStateRecord {
-        parent_issue,
-        child_issue,
-        mode: match plan.mode {
-            StructuredPlanMode::Single => "single".to_string(),
-            StructuredPlanMode::Split => "split".to_string(),
-        },
-        total_stages: plan.stages.len() as u32,
-        current_stage: 1,
-        status: SplitPlanStatus::ReadyNextStage,
-        active_branch: None,
-        active_pr_url: None,
-        stages: plan
-            .stages
-            .iter()
-            .map(|stage| SplitStateStage {
-                index: stage.index,
-                title: stage.title.clone(),
-                boundary: stage.boundary.clone(),
-                goal: stage.goal.clone(),
-                acceptance_subset: stage.acceptance_subset.clone(),
-            })
-            .collect(),
-    }
-}
-
-fn render_split_plan_markdown(state: &SplitStateRecord) -> String {
-    let mut lines = vec![format!(
-        "Mode: {}\nCurrent stage: {}/{}",
-        state.mode, state.current_stage, state.total_stages
-    )];
-    for stage in &state.stages {
-        lines.push(format!(
-            "\nStage {}: {}\nGoal: {}\nBoundary: {}\nAcceptance subset:\n{}",
-            stage.index,
-            stage.title,
-            stage.goal,
-            stage.boundary,
-            stage
-                .acceptance_subset
-                .iter()
-                .map(|item| format!("- {}", item))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    lines.join("\n")
-}
-
-fn build_review_loop_implementation_prompt(
-    parent: &ParentIssue,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    config: &Config,
-    plan_text: &str,
-    split_state: Option<&SplitStateRecord>,
-) -> String {
-    let stage_section = split_state
-        .and_then(current_split_stage)
-        .map(|stage| {
-            format!(
-                "\n\nCurrent stage only:\n- Stage: {}/{}\n- Title: {}\n- Goal: {}\n- Boundary: {}\n- Acceptance subset:\n{}\n- Stage max diff: {}\n\nDo not implement later stages in this run.",
-                stage.index,
-                split_state.map(|state| state.total_stages).unwrap_or(stage.index),
-                stage.title,
-                stage.goal,
-                stage.boundary,
-                stage
-                    .acceptance_subset
-                    .iter()
-                    .map(|item| format!("  - {}", item))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                child.target_size.max_lines(),
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        "{}\n\nImplementation plan:\n{}\n{}\n\nFollow the implementation plan before writing code.",
-        build_agent_prompt(parent, child, estimate, config),
-        plan_text,
-        stage_section
-    )
-}
-
-fn build_review_fix_prompt(
-    parent: &ParentIssue,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    config: &Config,
-    plan_text: &str,
-    branch_name: &str,
-    pr_base: &str,
-    bundle: &crate::github::CopilotReviewBundle,
-) -> String {
-    let comments = bundle
-        .threads
-        .iter()
-        .map(|thread| match (&thread.path, thread.line) {
-            (Some(path), Some(line)) => format!("- {}:{} {}", path, line, thread.body),
-            _ => format!("- {}", thread.body),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Address Copilot review feedback for child issue #{}.\n\nParent issue: #{} {}\nChild issue: #{} {}\nModel profile: {}\nModel: {}\nReasoning effort: {}\nBranch: {}\nPR base: {}\n\nSaved implementation plan:\n{}\n\nCopilot review comments:\n{}\n\nApply only valid, in-scope comments. Ignore invalid, out-of-scope, non-actionable, or already-satisfied comments. At the end, output a short summary with sections: Applied comments, Ignored comments, Ignored reasons.",
-        child.number,
-        parent.number,
-        parent.title,
-        child.number,
-        child.title,
-        estimate.model_profile,
-        estimate.model,
-        estimate.reasoning_effort,
-        branch_name,
-        pr_base,
-        plan_text,
-        comments
-    ) + &format!(
-        "\n\nRepository guidance:\n- Working directory: {}\n- Base branch: {}",
-        config.working_directory().display(),
-        config.github.base_branch
-    )
-}
-
-fn rerun_verification(
-    config: &Config,
-    child: &ChildIssue,
-    workdir: &std::path::Path,
-    child_run_dir: &std::path::Path,
-) -> Result<()> {
-    for (index, command) in child.verification.iter().enumerate() {
-        let result = agent_exec::run_shell_command(
-            &command.command,
-            workdir,
-            &[],
-            CommandRunOptions::streaming("verify"),
-        )?;
-        fs::write(
-            child_run_dir.join(format!("review-verification-{:02}.stdout", index + 1)),
-            &result.stdout,
-        )?;
-        fs::write(
-            child_run_dir.join(format!("review-verification-{:02}.stderr", index + 1)),
-            &result.stderr,
-        )?;
-        if !result.success() {
-            anyhow::bail!("verification_failed");
-        }
-    }
-    let _ = config;
-    Ok(())
-}
-
-fn summarize_review_fix_output(output: &str, total_comments: u32) -> (u32, u32) {
-    let applied = output
-        .lines()
-        .filter(|line| line.to_ascii_lowercase().contains("applied"))
-        .count() as u32;
-    let applied = applied.min(total_comments);
-    (applied, total_comments.saturating_sub(applied))
-}
-
-fn join_for_comment(values: &[String]) -> String {
-    if values.is_empty() {
-        "none".to_string()
-    } else {
-        values.join(", ")
-    }
+    git_ops::create_branch(workdir, branch_name, start_point)
 }
 
 fn preflight_target_repo(config: &Config) -> Result<String> {
     let workdir = config.working_directory();
-    if !workdir.exists() {
-        anyhow::bail!("target_repo_missing");
-    }
     git_ops::ensure_git_worktree(&workdir)?;
     match git_ops::origin_repo_slug(&workdir)? {
-        Some(slug) if slug == config.repo_slug() => Ok("true".to_string()),
-        Some(_) => anyhow::bail!("target_repo_mismatch"),
+        Some(remote) if remote == config.repo_slug() => Ok("true".to_string()),
+        Some(_) => bail!("target_repo_mismatch"),
         None => Ok("unknown".to_string()),
     }
 }
 
-fn ensure_clean_preflight(config: &Config) -> Result<(), SetupFailure> {
-    let workdir = config.working_directory();
-    let run_root = config.run_root();
-    let status = git_ops::worktree_status(&workdir, &[run_root]).map_err(|_| {
-        let mut failure = SetupFailure::new("git_status_failed");
-        failure.recovery = Some("inspect_git_status".to_string());
-        failure
-    })?;
-    if !status.dirty_paths.is_empty() {
-        let mut failure = SetupFailure::new("git_worktree_dirty");
-        failure.detail = Some(status.dirty_paths.join(","));
-        failure.git_stderr = if status.stderr.trim().is_empty() {
-            None
-        } else {
-            Some(status.stderr)
-        };
-        failure.recovery = Some("clean_worktree_and_retry".to_string());
-        return Err(failure);
-    }
+fn ensure_clean_preflight(config: &Config) -> Result<()> {
+    git_ops::ensure_clean_worktree(&config.working_directory(), &[config.run_root()])?;
     Ok(())
 }
 
-fn planned_issue_repairs(reasons: &[String], prepared: &mut PreparedIssue) {
-    let had_running = reasons
-        .iter()
-        .any(|reason| reason == "label_present_running");
-    let had_blocked = reasons
-        .iter()
-        .any(|reason| reason == "label_present_blocked");
-
-    if had_running {
-        prepared.repair(repair_action(
-            RepairKind::WouldClearRunning,
-            "cleared_running",
-            None,
-        ));
-        prepared.recovery = Some("auto_clear_running".to_string());
-    }
-    if had_blocked {
-        prepared.repair(repair_action(
-            RepairKind::WouldRestoreReadyFromBlocked,
-            "restored_ready_from_blocked",
-            None,
-        ));
-        prepared.recovery = Some("auto_restore_ready".to_string());
-    }
-    if had_running || had_blocked {
-        prepared.reasons.retain(|reason| {
-            reason != "label_present_running"
-                && reason != "label_present_blocked"
-                && reason != "label_missing_ready"
-        });
-    }
-}
-
-fn apply_split_state_annotations(
-    config: &Config,
-    github: &GitHubClient<'_>,
+fn nightly_branch_publication(
     parent_issue: u64,
-    child: &ChildIssue,
-    prepared: &mut PreparedIssue,
-    flow_mode: FlowMode,
-) -> Result<()> {
-    let path = split_state_path(config, parent_issue, child.number);
-    let Some(mut state) = load_split_state(&path)? else {
-        return Ok(());
-    };
-
-    if let Some(pr_url) = state.active_pr_url.as_deref() {
-        let lifecycle = github.pull_request_lifecycle_from_url(pr_url)?;
-        if lifecycle.merged {
-            if state.current_stage >= state.total_stages {
-                state.status = SplitPlanStatus::Complete;
-            } else {
-                state.current_stage += 1;
-                state.status = SplitPlanStatus::ReadyNextStage;
-                state.active_branch = None;
-                state.active_pr_url = None;
-            }
-        } else if state.status == SplitPlanStatus::ReadyNextStage {
-            state.status = SplitPlanStatus::AwaitingReview;
-        }
-    }
-
-    prepared.split_mode = Some(state.mode.clone());
-    prepared.stage_index = Some(state.current_stage);
-    prepared.stage_total = Some(state.total_stages);
-    prepared.split_state = Some(state.status.as_str().to_string());
-    prepared.split_plan = Some(state.clone());
-
-    match flow_mode {
-        FlowMode::Nightly => {
-            if state.mode == "split" && state.status != SplitPlanStatus::Complete {
-                prepared.status = "skipped".to_string();
-                prepared.reasons = vec!["split_required".to_string()];
-                prepared.detail = Some("split_required".to_string());
-                prepared.recovery = Some("run_start_for_staged_split".to_string());
-            }
-        }
-        FlowMode::ReviewLoop => match state.status {
-            SplitPlanStatus::AwaitingReview | SplitPlanStatus::AwaitingMerge => {
-                prepared.reasons.retain(|reason| {
-                    reason != "label_missing_ready"
-                        && reason != "label_present_review"
-                        && reason != "label_present_running"
-                        && reason != "label_present_blocked"
-                });
-                if !prepared
-                    .reasons
-                    .iter()
-                    .any(|reason| reason == "split_stage_review_pending")
-                {
-                    prepared
-                        .reasons
-                        .push("split_stage_review_pending".to_string());
-                }
-                prepared.recovery = Some("merge_stage_pr_to_continue".to_string());
-            }
-            SplitPlanStatus::ReadyNextStage => {
-                prepared.reasons.retain(|reason| {
-                    reason != "label_missing_ready"
-                        && reason != "label_present_review"
-                        && reason != "label_present_running"
-                        && reason != "label_present_blocked"
-                });
-                prepared.recovery = Some("auto_advance_split_stage".to_string());
-            }
-            SplitPlanStatus::Complete => {
-                prepared.status = "skipped".to_string();
-                prepared.reasons = vec!["split_complete".to_string()];
-                prepared.recovery = Some("issue_complete".to_string());
-            }
-        },
-    }
-
-    Ok(())
-}
-
-fn collect_dry_run_repairs(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    prepared: &mut PreparedCampaign,
-) -> Result<()> {
-    let statuses = github.list_labels()?;
-    let existing = statuses.into_iter().collect::<HashSet<_>>();
-    for item in crate::github::reconcile_managed_labels(&existing, &config.labels)
-        .into_iter()
-        .filter(|item| item.status == "created")
-    {
-        prepared.labels_repaired += 1;
-        prepared.repair_lines.push(vec![
-            ("label".to_string(), item.name),
-            ("status".to_string(), "would_create".to_string()),
-        ]);
-    }
-    mark_branch_repairs(config, prepared)?;
-    for item in &prepared.issues {
-        for repair in &item.repairs {
-            match repair.kind {
-                RepairKind::WouldDeleteStaleBranch => prepared.branches_repaired += 1,
-                RepairKind::WouldClearRunning | RepairKind::WouldRestoreReadyFromBlocked => {
-                    prepared.issues_repaired += 1
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
-fn apply_real_run_repairs(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    prepared: &mut PreparedCampaign,
-) -> Result<(), SetupFailure> {
-    let label_statuses = github.ensure_managed_labels().map_err(|err| SetupFailure {
-        code: "gh_label_create_failed".to_string(),
-        detail: Some("managed_label_bootstrap_failed".to_string()),
-        git_stderr: None,
-        gh_stderr: Some(err.to_string()),
-        recovery: Some("run_setup_labels_and_retry".to_string()),
-    })?;
-    for item in label_statuses
-        .into_iter()
-        .filter(|item| item.status == "created")
-    {
-        prepared.labels_repaired += 1;
-        prepared.repair_lines.push(vec![
-            ("label".to_string(), item.name),
-            ("status".to_string(), "created".to_string()),
-        ]);
-    }
-
-    for item in &mut prepared.issues {
-        if item.status != "selected" {
-            continue;
-        }
-        let has_running = item
-            .repairs
-            .iter()
-            .any(|repair| repair.kind == RepairKind::WouldClearRunning);
-        let has_blocked = item
-            .repairs
-            .iter()
-            .any(|repair| repair.kind == RepairKind::WouldRestoreReadyFromBlocked);
-        if !has_running && !has_blocked {
-            continue;
-        }
-
-        let mut remove = Vec::new();
-        if has_running {
-            remove.push(config.labels.running.as_str());
-        }
-        if has_blocked {
-            remove.push(config.labels.blocked.as_str());
-        }
-        let add = [config.labels.ready.as_str()];
-        github
-            .normalize_issue_labels(item.snapshot.number, &remove, &add)
-            .map_err(|err| SetupFailure {
-                code: "gh_label_update_failed".to_string(),
-                detail: Some("issue_label_repair_failed".to_string()),
-                git_stderr: None,
-                gh_stderr: Some(err.to_string()),
-                recovery: Some("repair_issue_labels_and_retry".to_string()),
-            })?;
-        if has_running {
-            item.repair(repair_action(
-                RepairKind::ClearRunning,
-                "cleared_running",
-                None,
-            ));
-            prepared.issues_repaired += 1;
-        }
-        if has_blocked {
-            item.repair(repair_action(
-                RepairKind::RestoreReadyFromBlocked,
-                "restored_ready_from_blocked",
-                None,
-            ));
-            prepared.issues_repaired += 1;
-        }
-    }
-
-    for item in &mut prepared.issues {
-        let Some(split_state) = item.split_plan.clone() else {
-            continue;
-        };
-        let state_path = split_state_path(config, prepared.parent.number, item.snapshot.number);
-        match split_state.status {
-            SplitPlanStatus::ReadyNextStage => {
-                github
-                    .normalize_issue_labels(
-                        item.snapshot.number,
-                        &[
-                            config.labels.review.as_str(),
-                            config.labels.running.as_str(),
-                            config.labels.blocked.as_str(),
-                        ],
-                        &[config.labels.ready.as_str()],
-                    )
-                    .map_err(|err| SetupFailure {
-                        code: "gh_label_update_failed".to_string(),
-                        detail: Some("advance_split_stage_failed".to_string()),
-                        git_stderr: None,
-                        gh_stderr: Some(err.to_string()),
-                        recovery: Some("repair_issue_labels_and_retry".to_string()),
-                    })?;
-                write_split_state(&state_path, &split_state).map_err(|err| SetupFailure {
-                    code: "split_state_write_failed".to_string(),
-                    detail: Some("advance_split_stage_failed".to_string()),
-                    git_stderr: Some(err.to_string()),
-                    gh_stderr: None,
-                    recovery: Some("fix_filesystem_and_retry".to_string()),
-                })?;
-                item.repair(repair_action(
-                    RepairKind::AdvanceSplitStage,
-                    "advanced_split_stage",
-                    None,
-                ));
-                prepared.issues_repaired += 1;
-                item.split_plan = Some(split_state.clone());
-            }
-            SplitPlanStatus::Complete => {
-                github
-                    .normalize_issue_labels(
-                        item.snapshot.number,
-                        &[
-                            config.labels.review.as_str(),
-                            config.labels.ready.as_str(),
-                            config.labels.running.as_str(),
-                            config.labels.blocked.as_str(),
-                        ],
-                        &[config.labels.done.as_str()],
-                    )
-                    .map_err(|err| SetupFailure {
-                        code: "gh_label_update_failed".to_string(),
-                        detail: Some("complete_split_plan_failed".to_string()),
-                        git_stderr: None,
-                        gh_stderr: Some(err.to_string()),
-                        recovery: Some("repair_issue_labels_and_retry".to_string()),
-                    })?;
-                write_split_state(&state_path, &split_state).map_err(|err| SetupFailure {
-                    code: "split_state_write_failed".to_string(),
-                    detail: Some("complete_split_plan_failed".to_string()),
-                    git_stderr: Some(err.to_string()),
-                    gh_stderr: None,
-                    recovery: Some("fix_filesystem_and_retry".to_string()),
-                })?;
-                item.repair(repair_action(
-                    RepairKind::CompleteSplitPlan,
-                    "completed_split_plan",
-                    None,
-                ));
-                prepared.issues_repaired += 1;
-                item.split_plan = Some(split_state.clone());
-            }
-            SplitPlanStatus::AwaitingReview | SplitPlanStatus::AwaitingMerge => {}
-        }
-    }
-
-    mark_branch_repairs(config, prepared).map_err(|err| SetupFailure {
-        code: "git_branch_lookup_failed".to_string(),
-        detail: Some("stale_branch_scan_failed".to_string()),
-        git_stderr: Some(err.to_string()),
-        gh_stderr: None,
-        recovery: Some("inspect_local_branches".to_string()),
-    })?;
-    Ok(())
-}
-
-fn mark_branch_repairs(config: &Config, prepared: &mut PreparedCampaign) -> Result<()> {
-    let workdir = config.working_directory();
-    for item in &mut prepared.issues {
-        if item.status != "selected" {
-            continue;
-        }
-        let branch_name = branch_name_for_stage(
-            prepared.parent.number,
-            item.snapshot.number,
-            item.split_mode.as_deref(),
-            item.stage_index,
-        );
-        if git_ops::local_branch_exists(&workdir, &branch_name)? {
-            item.repair(repair_action(
-                RepairKind::WouldDeleteStaleBranch,
-                "deleted_stale_branch",
-                Some(branch_name.clone()),
-            ));
-            item.recovery = Some("auto_delete_stale_branch".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn setup_issue_execution(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    child_number: u64,
-    workdir: &std::path::Path,
-    branch_name: &str,
-    base_sha: &str,
-    restore_branch: &str,
-    prompt_path: &std::path::Path,
-    prompt: &str,
-    labels_changed: &mut bool,
-    repairs: &mut Vec<RepairAction>,
-    branches_repaired: &mut u32,
-) -> Result<(), SetupFailure> {
-    if git_ops::local_branch_exists(workdir, branch_name).map_err(|_| {
-        let mut failure = SetupFailure::new("git_branch_lookup_failed");
-        failure.recovery = Some("inspect_local_branches".to_string());
-        failure
-    })? {
-        git_ops::delete_local_branch(workdir, branch_name, restore_branch).map_err(|_| {
-            let mut failure = SetupFailure::new("git_branch_delete_failed");
-            failure.detail = Some("branch_already_exists".to_string());
-            failure.recovery = Some("inspect_stale_branch_and_retry".to_string());
-            failure
-        })?;
-        repairs.push(repair_action(
-            RepairKind::DeleteStaleBranch,
-            "deleted_stale_branch",
-            Some(branch_name.to_string()),
-        ));
-        *branches_repaired += 1;
-    }
-
-    if let Some(branch_failure) = git_ops::create_branch_detailed(workdir, branch_name, base_sha)
-        .map_err(|_| {
-            let mut failure = SetupFailure::new("git_branch_create_failed");
-            failure.recovery = Some("inspect_git_error_and_retry".to_string());
-            failure
-        })?
-    {
-        return Err(SetupFailure {
-            code: branch_failure.code,
-            detail: branch_failure.detail,
-            git_stderr: branch_failure.git_stderr,
-            gh_stderr: None,
-            recovery: Some("delete_branch_and_retry".to_string()),
-        });
-    }
-
-    if let Err(err) =
-        github.remove_labels(child_number, &[&config.labels.ready, &config.labels.review])
-    {
-        return Err(setup_failure_after_branch(
-            config,
-            github,
-            child_number,
-            workdir,
-            restore_branch,
-            branch_name,
-            labels_changed,
-            SetupFailure {
-                code: "gh_label_update_failed".to_string(),
-                detail: Some("remove_ready_review_failed".to_string()),
-                git_stderr: None,
-                gh_stderr: Some(err.to_string()),
-                recovery: Some("restore_issue_labels_and_retry".to_string()),
-            },
-        ));
-    }
-    *labels_changed = true;
-    if let Err(err) = github.add_labels(child_number, &[&config.labels.running]) {
-        return Err(setup_failure_after_branch(
-            config,
-            github,
-            child_number,
-            workdir,
-            restore_branch,
-            branch_name,
-            labels_changed,
-            SetupFailure {
-                code: "gh_label_update_failed".to_string(),
-                detail: Some("add_running_failed".to_string()),
-                git_stderr: None,
-                gh_stderr: Some(err.to_string()),
-                recovery: Some("restore_issue_labels_and_retry".to_string()),
-            },
-        ));
-    }
-
-    if let Err(err) = fs::write(prompt_path, prompt) {
-        return Err(setup_failure_after_branch(
-            config,
-            github,
-            child_number,
-            workdir,
-            restore_branch,
-            branch_name,
-            labels_changed,
-            SetupFailure {
-                code: "prompt_write_failed".to_string(),
-                detail: None,
-                git_stderr: Some(err.to_string()),
-                gh_stderr: None,
-                recovery: Some("fix_filesystem_and_retry".to_string()),
-            },
-        ));
-    }
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn execute_single_child_flow(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    parent: &ParentIssue,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    item: &mut PreparedIssue,
-    run_id: &str,
-    child_run_dir: &std::path::Path,
-    prompt: &str,
-    branch_name: &str,
-    pr_base: &str,
-    base_sha: &str,
-    branches_repaired: &mut u32,
-    flow_mode: FlowMode,
-    push_after_commit: bool,
-    record_telemetry: bool,
-) -> Result<ExecutionOutcome> {
-    let workdir = config.working_directory();
-    let prompt_path = child_run_dir.join("agent-prompt.md");
-    item.branch = Some(branch_name.to_string());
-    emit_progress(progress_implementing_branch(branch_name));
-
-    let mut labels_changed = false;
-    setup_issue_execution(
-        config,
-        github,
-        child.number,
-        &workdir,
-        branch_name,
-        base_sha,
-        pr_base,
-        &prompt_path,
-        prompt,
-        &mut labels_changed,
-        &mut item.repairs,
-        branches_repaired,
-    )
-    .map_err(|failure| anyhow!(failure.code.clone()))?;
-    fs::write(&prompt_path, prompt)?;
-
-    let min_diff = config.diff.min_lines.max(child.target_size.min_lines());
-    let max_diff = config.diff.max_lines.min(child.target_size.max_lines());
-    let envs = vec![
-        (
-            "NIGHTLOOP_PARENT_ISSUE".to_string(),
-            parent.number.to_string(),
-        ),
-        (
-            "NIGHTLOOP_CHILD_ISSUE".to_string(),
-            child.number.to_string(),
-        ),
-        ("NIGHTLOOP_CHILD_TITLE".to_string(), child.title.clone()),
-        (
-            "NIGHTLOOP_MODEL_PROFILE".to_string(),
-            estimate.model_profile.clone(),
-        ),
-        ("NIGHTLOOP_MODEL".to_string(), estimate.model.clone()),
-        (
-            "NIGHTLOOP_REASONING_EFFORT".to_string(),
-            estimate.reasoning_effort.clone(),
-        ),
-        (
-            "NIGHTLOOP_PROMPT_FILE".to_string(),
-            prompt_path.display().to_string(),
-        ),
-        (
-            "NIGHTLOOP_RUN_DIR".to_string(),
-            child_run_dir.display().to_string(),
-        ),
-        ("NIGHTLOOP_BASE_BRANCH".to_string(), pr_base.to_string()),
-        ("NIGHTLOOP_DIFF_MIN".to_string(), min_diff.to_string()),
-        ("NIGHTLOOP_DIFF_MAX".to_string(), max_diff.to_string()),
-    ];
-
-    let started = Instant::now();
-    let agent_result = agent_exec::run_shell_command(
-        &config.agent.command,
-        &workdir,
-        &envs,
-        CommandRunOptions::streaming("agent").with_stdin(prompt),
-    )?;
-    fs::write(child_run_dir.join("agent.stdout"), &agent_result.stdout)?;
-    fs::write(child_run_dir.join("agent.stderr"), &agent_result.stderr)?;
-
-    let mut failure_code = None;
-    if !agent_result.success() {
-        failure_code = Some("agent_command_failed".to_string());
-    }
-    if failure_code.is_none() {
-        for (index, command) in child.verification.iter().enumerate() {
-            let result = agent_exec::run_shell_command(
-                &command.command,
-                &workdir,
-                &envs,
-                CommandRunOptions::streaming("verify"),
-            )?;
-            fs::write(
-                child_run_dir.join(format!("verification-{:02}.stdout", index + 1)),
-                &result.stdout,
-            )?;
-            fs::write(
-                child_run_dir.join(format!("verification-{:02}.stderr", index + 1)),
-                &result.stderr,
-            )?;
-            if !result.success() {
-                failure_code = Some("verification_failed".to_string());
-                break;
-            }
-        }
-    }
-
-    let diff_stat =
-        git_ops::diff_against(&workdir, base_sha, &[config.run_root()]).unwrap_or(DiffStat {
-            changed_lines: 0,
-            files_touched: 0,
-        });
-    if failure_code.is_none() {
-        if let Err(err) = diff_budget::enforce_diff_budget(config, child, diff_stat) {
-            failure_code = Some(err.to_string());
-        }
-    }
-
-    let actual_minutes = ((started.elapsed().as_secs() + 59) / 60) as u32;
-    item.actual_minutes = Some(actual_minutes);
-    if let Some(code) = failure_code {
-        let outcome = match flow_mode {
-            FlowMode::Nightly if code == "diff_exceeds_target_size" => {
-                finalize_split_required(
-                    config,
-                    github,
-                    child,
-                    estimate,
-                    parent.number,
-                    run_id,
-                    branch_name,
-                    pr_base,
-                    diff_stat,
-                    actual_minutes,
-                    "run".to_string(),
-                )?;
-                item.status = "skipped".to_string();
-                item.reasons = vec!["split_required".to_string()];
-                item.detail = Some("split_required".to_string());
-                item.recovery = Some("run_start_for_staged_split".to_string());
-                ExecutionStatus::PrePrFailure {
-                    code: "split_required".to_string(),
-                    detail: Some("split_required".to_string()),
-                    git_stderr: None,
-                    gh_stderr: None,
-                    recovery: Some("run_start_for_staged_split".to_string()),
-                }
-            }
-            FlowMode::ReviewLoop if code == "diff_exceeds_target_size" => {
-                let state_path = split_state_path(config, parent.number, child.number);
-                finalize_split_plan_outdated(
-                    config,
-                    github,
-                    child,
-                    estimate,
-                    parent.number,
-                    run_id,
-                    branch_name,
-                    pr_base,
-                    diff_stat,
-                    actual_minutes,
-                    &state_path,
-                )?;
-                item.status = "skipped".to_string();
-                item.reasons = vec!["split_plan_outdated".to_string()];
-                item.detail = Some("split_plan_outdated".to_string());
-                item.recovery = Some("use_start_with_staged_split".to_string());
-                item.split_state = Some(SplitPlanStatus::ReadyNextStage.as_str().to_string());
-                ExecutionStatus::PrePrFailure {
-                    code: "split_plan_outdated".to_string(),
-                    detail: Some("split_plan_outdated".to_string()),
-                    git_stderr: None,
-                    gh_stderr: None,
-                    recovery: Some("use_start_with_staged_split".to_string()),
-                }
-            }
-            _ => {
-                finalize_failure(
-                    config,
-                    github,
-                    child,
-                    estimate,
-                    parent.number,
-                    run_id,
-                    branch_name,
-                    pr_base,
-                    &code,
-                    diff_stat,
-                    actual_minutes,
-                )?;
-                item.status = "blocked".to_string();
-                item.reasons = vec![code.clone()];
-                ExecutionStatus::PrePrFailure {
-                    code,
-                    detail: Some("pre_pr_failure".to_string()),
-                    git_stderr: None,
-                    gh_stderr: None,
-                    recovery: None,
-                }
-            }
-        };
-        return Ok(ExecutionOutcome {
-            status: outcome,
-            actual_minutes,
-            diff_stat,
-            pr_url: None,
-        });
-    }
-
-    if let Err(err) = git_ops::commit_all(
-        &workdir,
-        &format!("nightloop: issue #{} {}", child.number, child.title),
-    ) {
-        let code = err.to_string();
-        finalize_failure(
-            config,
-            github,
-            child,
-            estimate,
-            parent.number,
-            run_id,
-            branch_name,
-            pr_base,
-            &code,
-            diff_stat,
-            actual_minutes,
-        )?;
-        item.status = "blocked".to_string();
-        item.reasons = vec![code.clone()];
-        return Ok(ExecutionOutcome {
-            status: ExecutionStatus::PrePrFailure {
-                code,
-                detail: Some("pre_pr_failure".to_string()),
-                git_stderr: None,
-                gh_stderr: None,
-                recovery: None,
-            },
-            actual_minutes,
-            diff_stat,
-            pr_url: None,
-        });
-    }
-    if push_after_commit {
-        if let Err(err) = git_ops::push_current_branch(&workdir, branch_name) {
-            let code = err.to_string();
-            finalize_failure(
-                config,
-                github,
-                child,
-                estimate,
-                parent.number,
-                run_id,
-                branch_name,
-                pr_base,
-                &code,
-                diff_stat,
-                actual_minutes,
-            )?;
-            item.status = "blocked".to_string();
-            item.reasons = vec![code.clone()];
-            return Ok(ExecutionOutcome {
-                status: ExecutionStatus::PrePrFailure {
-                    code,
-                    detail: Some("pre_pr_failure".to_string()),
-                    git_stderr: None,
-                    gh_stderr: None,
-                    recovery: None,
-                },
-                actual_minutes,
-                diff_stat,
-                pr_url: None,
-            });
-        }
-    }
-    let pr_title = if matches!(item.split_mode.as_deref(), Some("split")) {
-        let stage_index = item.stage_index.unwrap_or(1);
-        let stage_total = item.stage_total.unwrap_or(stage_index);
-        let stage_title = item
-            .split_plan
-            .as_ref()
-            .and_then(current_split_stage)
-            .map(|stage| stage.title.clone())
-            .unwrap_or_else(|| child.title.clone());
-        format!(
-            "[Task #{} / Stage {}/{}] {}",
-            child.number, stage_index, stage_total, stage_title
-        )
-    } else {
-        format!("[Task #{}] {}", child.number, child.title)
-    };
-    let pr_body = if matches!(item.split_mode.as_deref(), Some("split")) {
-        let stage = item
-            .split_plan
-            .as_ref()
-            .and_then(current_split_stage)
-            .ok_or_else(|| anyhow!("split_stage_missing"))?;
-        format!(
-            "Implements stage {}/{} of #{}\n\nStage goal:\n{}\n\nStage boundary:\n{}\n\nAcceptance subset:\n{}\n\nSource of truth:\n{}\n\nVerification:\n{}",
-            item.stage_index.unwrap_or(stage.index),
-            item.stage_total.unwrap_or(stage.index),
-            child.number,
-            stage.goal,
-            stage.boundary,
-            stage
-                .acceptance_subset
-                .iter()
-                .map(|item| format!("- {}", item))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            child.source_of_truth_raw,
-            child
-                .verification
-                .iter()
-                .map(|command| format!("- `{}`", command.command))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    } else {
-        format!(
-            "Implements #{}\n\nSource of truth:\n{}\n\nVerification:\n{}",
-            child.number,
-            child.source_of_truth_raw,
-            child
-                .verification
-                .iter()
-                .map(|command| format!("- `{}`", command.command))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    };
-    let pr_url = match github.create_draft_pr(pr_base, branch_name, &pr_title, &pr_body) {
-        Ok(pr_url) => pr_url,
-        Err(err) => {
-            let code = err.to_string();
-            finalize_failure(
-                config,
-                github,
-                child,
-                estimate,
-                parent.number,
-                run_id,
-                branch_name,
-                pr_base,
-                &code,
-                diff_stat,
-                actual_minutes,
-            )?;
-            item.status = "blocked".to_string();
-            item.reasons = vec![code.clone()];
-            return Ok(ExecutionOutcome {
-                status: ExecutionStatus::PrePrFailure {
-                    code,
-                    detail: Some("pre_pr_failure".to_string()),
-                    git_stderr: None,
-                    gh_stderr: None,
-                    recovery: None,
-                },
-                actual_minutes,
-                diff_stat,
-                pr_url: None,
-            });
-        }
-    };
-    item.pr_url = Some(pr_url.clone());
-    if matches!(item.split_mode.as_deref(), Some("split")) {
-        let state_path = split_state_path(config, parent.number, child.number);
-        let mut split_state = item
-            .split_plan
-            .clone()
-            .ok_or_else(|| anyhow!("split_state_missing"))?;
-        split_state.status = SplitPlanStatus::AwaitingReview;
-        split_state.active_branch = Some(branch_name.to_string());
-        split_state.active_pr_url = Some(pr_url.clone());
-        write_split_state(&state_path, &split_state)?;
-        item.split_state = Some(split_state.status.as_str().to_string());
-        item.split_plan = Some(split_state);
-    }
-    if config.github.request_copilot_review {
-        emit_progress(progress_requesting_copilot_review());
-        match github.request_pr_review(&pr_url, &config.github.copilot_reviewer) {
-            Ok(()) => item.copilot_review = Some("requested".to_string()),
-            Err(_) => {
-                item.copilot_review = Some("failed".to_string());
-                item.reasons
-                    .push("copilot_review_request_failed".to_string());
-            }
-        }
-    }
-    github.remove_labels(child.number, &[&config.labels.running])?;
-    github.add_labels(child.number, &[&config.labels.review])?;
-    github.comment_issue(
-        child.number,
-        &format!(
-            "nightloop success\n\n- branch: `{}`\n- draft PR: {}\n- estimated minutes: {}\n- actual minutes: {}\n- changed lines: {}\n{}",
-            branch_name,
-            pr_url,
-            estimate.estimated_minutes,
-            actual_minutes,
-            diff_stat.changed_lines,
-            build_copilot_review_comment_line(item.copilot_review.as_deref())
-        ),
-    )?;
-    if record_telemetry {
-        telemetry::append_run_record(
-            &config.telemetry_history_path(),
-            &RunRecord {
-                run_id: run_id.to_string(),
-                parent_issue: parent.number,
-                issue_number: child.number,
-                issue_title: child.title.clone(),
-                model_profile: estimate.model_profile.clone(),
-                model: estimate.model.clone(),
-                reasoning_effort: estimate.reasoning_effort.clone(),
-                target_size: child.target_size.clone(),
-                docs_impact: child.docs_impact.clone(),
-                estimated_minutes: estimate.estimated_minutes,
-                actual_minutes,
-                changed_lines: diff_stat.changed_lines,
-                files_touched: diff_stat.files_touched,
-                success: true,
-                status: "success".to_string(),
-                workflow: "run".to_string(),
-                planner_used: false,
-                copilot_review: item.copilot_review.clone(),
-                review_comments_total: 0,
-                review_comments_applied: 0,
-                review_comments_ignored: 0,
-                fix_rounds: 0,
-                split_mode: item.split_mode.clone(),
-                stage_index: item.stage_index,
-                stage_total: item.stage_total,
-                stage_completed: true,
-                active_pr_url: Some(pr_url.clone()),
-                branch: branch_name.to_string(),
-                pr_base: pr_base.to_string(),
-                pr_url: Some(pr_url.clone()),
-                recorded_at: Utc::now(),
-            },
-        )?;
-    }
-    item.status = "completed".to_string();
-    Ok(ExecutionOutcome {
-        status: ExecutionStatus::Success,
-        actual_minutes,
-        diff_stat,
-        pr_url: Some(pr_url),
-    })
-}
-
-fn setup_failure_after_branch(
-    config: &Config,
-    github: &GitHubClient<'_>,
-    child_number: u64,
-    workdir: &std::path::Path,
-    restore_branch: &str,
-    created_branch: &str,
-    labels_changed: &mut bool,
-    mut failure: SetupFailure,
-) -> SetupFailure {
-    if *labels_changed {
-        if let Err(err) = github.remove_labels(child_number, &[&config.labels.running]) {
-            if failure.gh_stderr.is_none() {
-                failure.gh_stderr = Some(err.to_string());
-            }
-        }
-        if let Err(err) = github.add_labels(child_number, &[&config.labels.ready]) {
-            if failure.gh_stderr.is_none() {
-                failure.gh_stderr = Some(err.to_string());
-            }
-        }
-    }
-    if let Err(err) = git_ops::switch_branch(workdir, restore_branch) {
-        if failure.git_stderr.is_none() {
-            failure.git_stderr = Some(err.to_string());
-        }
-    }
-    if let Ok(true) = git_ops::local_branch_exists(workdir, created_branch) {
-        if let Err(err) = git_ops::delete_local_branch(workdir, created_branch, restore_branch) {
-            if failure.git_stderr.is_none() {
-                failure.git_stderr = Some(err.to_string());
-            }
-        }
-    }
-    if failure.detail.is_none() {
-        failure.detail = Some(format!("branch={created_branch}"));
-    }
-    failure
-}
-
-fn build_copilot_review_comment_line(status: Option<&str>) -> String {
-    match status {
-        Some("requested") => "- copilot review requested: true".to_string(),
-        Some("failed") => {
-            "- copilot review requested: failed (`copilot_review_request_failed`)".to_string()
-        }
-        _ => String::new(),
+    child_issue: u64,
+    base_branch: &str,
+    previous_success_branch: Option<&str>,
+) -> Publication {
+    Publication {
+        branch_name: format!("nightloop/{}-{}", parent_issue, child_issue),
+        pr_base: previous_success_branch.unwrap_or(base_branch).to_string(),
+        push_before_pr: true,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, env, fs, process::Command};
+    use std::{env, fs, path::Path, process::Command};
 
-    use crate::{
-        config::Config,
-        models::{
-            ChildIssue, Confidence, DocsImpact, EstimationBasis, IssueSnapshot, IssueState,
-            ParentIssue, SizeBand,
-        },
-    };
+    use super::{nightly_branch_publication, preflight_target_repo, Publication};
+    use crate::config::Config;
 
-    use super::{
-        apply_planner_prompt_prefix, build_copilot_review_comment_line, build_report,
-        build_report_with_workflow, extract_structured_plan, preflight_target_repo,
-        progress_applying_review_feedback, progress_implementing_branch, progress_planning_child,
-        progress_requesting_copilot_review, progress_waiting_for_copilot_review, repair_action,
-        CommandRunOptions, PreparedCampaign, PreparedIssue, RepairKind, ReviewLoopState,
-        StructuredPlanMode,
-    };
-
-    #[test]
-    fn copilot_review_comment_line_matches_status() {
-        assert_eq!(
-            build_copilot_review_comment_line(Some("requested")),
-            "- copilot review requested: true"
-        );
-        assert!(build_copilot_review_comment_line(Some("failed"))
-            .contains("copilot_review_request_failed"));
-        assert!(build_copilot_review_comment_line(Some("skipped")).is_empty());
+    fn init_git_repo(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        assert!(Command::new("git")
+            .current_dir(path)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap()
+            .status
+            .success());
     }
 
-    #[test]
-    fn planner_prompt_prefix_is_applied_only_to_plan_prompt() {
-        let root = env::temp_dir().join(format!("nightloop-plan-prefix-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let config = config_for_target(&root, &root, "semigrp/nightloop");
-        let prompt = apply_planner_prompt_prefix(&config, "body");
-        assert!(prompt.starts_with("/plan\n\n"));
-        assert!(prompt.ends_with("body"));
-    }
-
-    #[test]
-    fn structured_plan_parser_accepts_single_and_split_shapes() {
-        let root = env::temp_dir().join(format!("nightloop-plan-parse-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let config = config_for_target(&root, &root, "semigrp/nightloop");
-
-        let single = extract_structured_plan(
-            "{\"mode\":\"single\",\"summary\":\"ok\",\"stages\":[{\"index\":1,\"title\":\"one\",\"goal\":\"goal\",\"boundary\":\"boundary\",\"acceptance_subset\":[\"subset\"],\"estimated_changed_lines\":200}]}\n\nrest",
-            &child_issue(),
-            &config,
-        )
-        .unwrap();
-        assert_eq!(single.mode, StructuredPlanMode::Single);
-
-        let split = extract_structured_plan(
-            "{\"mode\":\"split\",\"summary\":\"ok\",\"stages\":[{\"index\":1,\"title\":\"one\",\"goal\":\"goal\",\"boundary\":\"boundary\",\"acceptance_subset\":[\"subset\"],\"estimated_changed_lines\":200},{\"index\":2,\"title\":\"two\",\"goal\":\"goal\",\"boundary\":\"boundary\",\"acceptance_subset\":[\"subset\"],\"estimated_changed_lines\":200}]}\n\nrest",
-            &child_issue(),
-            &config,
-        )
-        .unwrap();
-        assert_eq!(split.mode, StructuredPlanMode::Split);
-        assert_eq!(split.stages.len(), 2);
-    }
-
-    #[test]
-    fn structured_plan_parser_rejects_missing_json_prefix() {
-        let root = env::temp_dir().join(format!("nightloop-plan-parse-bad-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let config = config_for_target(&root, &root, "semigrp/nightloop");
-        assert_eq!(
-            extract_structured_plan("plan first\n{\"mode\":\"single\"}", &child_issue(), &config)
-                .unwrap_err()
-                .to_string(),
-            "plan_parse_failed"
-        );
-    }
-
-    fn config_for_target(
-        control: &std::path::Path,
-        target: &std::path::Path,
-        slug: &str,
-    ) -> Config {
-        let (owner, repo) = slug.split_once('/').unwrap();
-        let config_path = control.join("nightloop.toml");
+    fn config_for_repo(root: &Path, repo_root: &Path, remote: Option<&str>) -> Config {
+        fs::create_dir_all(root).unwrap();
+        if let Some(url) = remote {
+            assert!(Command::new("git")
+                .current_dir(repo_root)
+                .args(["remote", "add", "origin", url])
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        let config_path = root.join("nightloop.toml");
         fs::write(
             &config_path,
             format!(
                 r#"[github]
-owner = "{owner}"
-repo = "{repo}"
+owner = "o"
+repo = "r"
 base_branch = "main"
 
 [agent]
@@ -3407,11 +793,10 @@ blocked = "agent:blocked"
 done = "agent:done"
 
 [docs]
-required_paths = []
+required_paths = ["README.md", "AGENTS.md"]
 
 [estimation]
 default_basis = "hybrid"
-allow_ai_assist = true
 template_minutes_xs = 35
 template_minutes_s = 50
 template_minutes_m = 80
@@ -3427,376 +812,41 @@ min_samples_for_local = 1
 local_weight = 0.65
 template_weight = 0.35
 "#,
-                target.display()
+                repo_root.display()
             ),
         )
         .unwrap();
         Config::load(&config_path).unwrap()
     }
 
-    fn child_issue() -> ChildIssue {
-        ChildIssue {
-            number: 222,
-            title: "Child".to_string(),
-            body: String::new(),
-            state: IssueState::Open,
-            labels: vec!["night-run".to_string(), "agent:ready".to_string()],
-            url: None,
-            sections: Default::default(),
-            background: "bg".to_string(),
-            goal: "goal".to_string(),
-            scope: "scope".to_string(),
-            out_of_scope: "out".to_string(),
-            source_of_truth_raw: "README.md".to_string(),
-            source_of_truth: Vec::new(),
-            implementation_constraints: None,
-            acceptance_criteria: "- one".to_string(),
-            verification_raw: "cmd: cargo test".to_string(),
-            verification: Vec::new(),
-            dependencies_raw: "none".to_string(),
-            dependencies: Vec::new(),
-            target_size: SizeBand::M,
-            docs_impact: DocsImpact::None,
-            suggested_model_profile: "balanced".to_string(),
-            suggested_model_override: None,
-            estimated_minutes: 80,
-            estimation_basis: EstimationBasis::Template,
-            estimation_confidence: Confidence::Medium,
-        }
-    }
-
-    fn git(dir: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {:?} failed", args);
-    }
-
     #[test]
     fn preflight_target_repo_accepts_matching_remote_and_unknown_without_origin() {
-        let root = env::temp_dir().join(format!("nightloop-preflight-{}", std::process::id()));
+        let root =
+            env::temp_dir().join(format!("nightloop-runner-preflight-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let control = root.join("control");
-        let target_match = root.join("target-match");
-        let target_unknown = root.join("target-unknown");
-        fs::create_dir_all(&control).unwrap();
-        fs::create_dir_all(&target_match).unwrap();
-        fs::create_dir_all(&target_unknown).unwrap();
-
-        git(&target_match, &["init"]);
-        git(
-            &target_match,
-            &[
-                "remote",
-                "add",
-                "origin",
-                "git@github.com:semigrp/nightloop.git",
-            ],
+        let matching = root.join("matching");
+        let unknown = root.join("unknown");
+        init_git_repo(&matching);
+        init_git_repo(&unknown);
+        let matching_config = config_for_repo(
+            &root.join("control-a"),
+            &matching,
+            Some("https://github.com/o/r.git"),
         );
-
-        git(&target_unknown, &["init"]);
-
-        let matching = config_for_target(&control, &target_match, "semigrp/nightloop");
-        assert_eq!(preflight_target_repo(&matching).unwrap(), "true");
-
-        let unknown = config_for_target(&control, &target_unknown, "semigrp/nightloop");
-        assert_eq!(preflight_target_repo(&unknown).unwrap(), "unknown");
+        let unknown_config = config_for_repo(&root.join("control-b"), &unknown, None);
+        assert_eq!(preflight_target_repo(&matching_config).unwrap(), "true");
+        assert_eq!(preflight_target_repo(&unknown_config).unwrap(), "unknown");
     }
 
     #[test]
-    fn preflight_target_repo_rejects_mismatched_remote() {
-        let root = env::temp_dir().join(format!(
-            "nightloop-preflight-mismatch-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let control = root.join("control");
-        let target = root.join("target");
-        fs::create_dir_all(&control).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        git(&target, &["init"]);
-        git(
-            &target,
-            &["remote", "add", "origin", "git@github.com:other/repo.git"],
-        );
+    fn nightly_branch_publication_is_stacked_and_always_pushes_before_pr() {
+        let first: Publication = nightly_branch_publication(221, 222, "main", None);
+        assert_eq!(first.branch_name, "nightloop/221-222");
+        assert_eq!(first.pr_base, "main");
+        assert!(first.push_before_pr);
 
-        let config = config_for_target(&control, &target, "semigrp/nightloop");
-        assert_eq!(
-            preflight_target_repo(&config).unwrap_err().to_string(),
-            "target_repo_mismatch"
-        );
-    }
-
-    #[test]
-    fn shell_command_succeeds_when_prompt_is_sent_on_stdin() {
-        let root = env::temp_dir().join(format!("nightloop-runner-stdin-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let result = crate::agent_exec::run_shell_command(
-            "python3 -c 'import sys; data=sys.stdin.read(); print(\"stdin-ok\" if data else \"stdin-missing\"); raise SystemExit(0 if data else 1)'",
-            &root,
-            &[(
-                "NIGHTLOOP_PROMPT_FILE".to_string(),
-                root.join("prompt.md").display().to_string(),
-            )],
-            CommandRunOptions::default().with_stdin("prompt body"),
-        )
-        .unwrap();
-        assert!(result.success());
-        assert_eq!(result.stdout, "stdin-ok");
-    }
-
-    #[test]
-    fn dry_run_repairs_report_running_label_and_counts() {
-        let campaign = PreparedCampaign {
-            parent: ParentIssue {
-                number: 221,
-                title: "Parent".to_string(),
-                body: String::new(),
-                state: IssueState::Open,
-                labels: Vec::new(),
-                url: None,
-                sections: Default::default(),
-                children: Vec::new(),
-            },
-            issues: vec![PreparedIssue {
-                snapshot: IssueSnapshot {
-                    number: 222,
-                    title: "Child".to_string(),
-                    body: String::new(),
-                    state: IssueState::Open,
-                    labels: vec!["agent:running".to_string()],
-                    url: None,
-                },
-                child: None,
-                estimate: None,
-                reasons: vec!["label_present_running".to_string()],
-                lint_findings: Vec::new(),
-                status: "skipped".to_string(),
-                actual_minutes: None,
-                branch: None,
-                pr_url: None,
-                copilot_review: None,
-                detail: None,
-                git_stderr: None,
-                gh_stderr: None,
-                recovery: None,
-                repairs: vec![
-                    repair_action(RepairKind::WouldClearRunning, "cleared_running", None),
-                    repair_action(
-                        RepairKind::WouldDeleteStaleBranch,
-                        "deleted_stale_branch",
-                        Some("nightloop/221-222".to_string()),
-                    ),
-                ],
-                split_mode: None,
-                stage_index: None,
-                stage_total: None,
-                split_state: None,
-                split_plan: None,
-            }],
-            issue_snapshots: HashMap::new(),
-            dependency_done_cache: HashMap::new(),
-            estimated_total_minutes: 0,
-            remaining_minutes: 100,
-            hours: 2,
-            target_repo_match: "true".to_string(),
-            target_repo_root: "/tmp/target".to_string(),
-            run_root: "/tmp/target/.nightloop/runs".to_string(),
-            detail: None,
-            git_stderr: None,
-            gh_stderr: None,
-            recovery: None,
-            repair_lines: vec![vec![
-                ("label".to_string(), "agent:running".to_string()),
-                ("status".to_string(), "would_create".to_string()),
-            ]],
-            labels_repaired: 1,
-            issues_repaired: 1,
-            branches_repaired: 1,
-        };
-        let report = build_report(&campaign, true, true, 0);
-        assert!(report.ok);
-        assert!(report.lines[0]
-            .iter()
-            .any(|(key, value)| key == "issues_repaired" && value == "1"));
-        assert!(report.lines[1].iter().any(|(key, _value)| key == "label"));
-        assert!(report.lines.iter().any(|line| line
-            .iter()
-            .any(|(key, value)| key == "repair" && value == "would_clear_running")));
-        assert!(report.lines.iter().any(|line| line
-            .iter()
-            .any(|(key, value)| key == "repair" && value == "would_delete_stale_branch")));
-        assert!(report.progress_lines.is_empty());
-    }
-
-    #[test]
-    fn nightly_report_emits_branch_progress_for_selected_issue() {
-        let campaign = PreparedCampaign {
-            parent: ParentIssue {
-                number: 221,
-                title: "Parent".to_string(),
-                body: String::new(),
-                state: IssueState::Open,
-                labels: Vec::new(),
-                url: None,
-                sections: Default::default(),
-                children: Vec::new(),
-            },
-            issues: vec![PreparedIssue {
-                snapshot: IssueSnapshot {
-                    number: 222,
-                    title: "Child".to_string(),
-                    body: String::new(),
-                    state: IssueState::Open,
-                    labels: vec!["agent:ready".to_string()],
-                    url: None,
-                },
-                child: None,
-                estimate: None,
-                reasons: Vec::new(),
-                lint_findings: Vec::new(),
-                status: "selected".to_string(),
-                actual_minutes: None,
-                branch: None,
-                pr_url: None,
-                copilot_review: None,
-                detail: None,
-                git_stderr: None,
-                gh_stderr: None,
-                recovery: None,
-                repairs: Vec::new(),
-                split_mode: None,
-                stage_index: None,
-                stage_total: None,
-                split_state: None,
-                split_plan: None,
-            }],
-            issue_snapshots: HashMap::new(),
-            dependency_done_cache: HashMap::new(),
-            estimated_total_minutes: 80,
-            remaining_minutes: 20,
-            hours: 2,
-            target_repo_match: "true".to_string(),
-            target_repo_root: "/tmp/target".to_string(),
-            run_root: "/tmp/target/.nightloop/runs".to_string(),
-            detail: None,
-            git_stderr: None,
-            gh_stderr: None,
-            recovery: None,
-            repair_lines: Vec::new(),
-            labels_repaired: 0,
-            issues_repaired: 0,
-            branches_repaired: 0,
-        };
-        let report = build_report(&campaign, true, true, 0);
-        assert_eq!(
-            report.progress_lines,
-            vec![format!(
-                "would {}",
-                progress_implementing_branch("nightloop/221-222")
-            )]
-        );
-        let real_report = build_report(&campaign, false, true, 0);
-        assert!(real_report.progress_lines.is_empty());
-    }
-
-    #[test]
-    fn real_review_loop_report_no_longer_carries_progress_lines() {
-        let campaign = PreparedCampaign {
-            parent: ParentIssue {
-                number: 221,
-                title: "Parent".to_string(),
-                body: String::new(),
-                state: IssueState::Open,
-                labels: Vec::new(),
-                url: None,
-                sections: Default::default(),
-                children: Vec::new(),
-            },
-            issues: vec![PreparedIssue {
-                snapshot: IssueSnapshot {
-                    number: 222,
-                    title: "Child".to_string(),
-                    body: String::new(),
-                    state: IssueState::Open,
-                    labels: vec!["agent:ready".to_string()],
-                    url: None,
-                },
-                child: None,
-                estimate: None,
-                reasons: Vec::new(),
-                lint_findings: Vec::new(),
-                status: "completed".to_string(),
-                actual_minutes: Some(5),
-                branch: Some("nightloop/221-222".to_string()),
-                pr_url: Some("https://example.com/pr/1".to_string()),
-                copilot_review: Some("requested".to_string()),
-                detail: None,
-                git_stderr: None,
-                gh_stderr: None,
-                recovery: None,
-                repairs: Vec::new(),
-                split_mode: None,
-                stage_index: None,
-                stage_total: None,
-                split_state: None,
-                split_plan: None,
-            }],
-            issue_snapshots: HashMap::new(),
-            dependency_done_cache: HashMap::new(),
-            estimated_total_minutes: 80,
-            remaining_minutes: 20,
-            hours: 2,
-            target_repo_match: "true".to_string(),
-            target_repo_root: "/tmp/target".to_string(),
-            run_root: "/tmp/target/.nightloop/runs".to_string(),
-            detail: None,
-            git_stderr: None,
-            gh_stderr: None,
-            recovery: None,
-            repair_lines: Vec::new(),
-            labels_repaired: 0,
-            issues_repaired: 0,
-            branches_repaired: 0,
-        };
-        let workflow = ReviewLoopState {
-            workflow: "review_loop".to_string(),
-            selected_child_issue: Some(222),
-            plan_generated: true,
-            copilot_review_status: Some("received".to_string()),
-            review_fix_rounds: 1,
-            review_comments_total: 2,
-            review_comments_applied: 1,
-            review_comments_ignored: 1,
-            split_mode: None,
-            stage_index: None,
-            stage_total: None,
-            split_state: None,
-        };
-        let report = build_report_with_workflow(&campaign, false, true, 5, Some(&workflow));
-        assert_eq!(report.progress_lines, Vec::<String>::new());
-    }
-
-    #[test]
-    fn progress_helpers_define_review_loop_live_phase_order() {
-        assert_eq!(
-            vec![
-                progress_planning_child(222),
-                progress_implementing_branch("nightloop/221-222"),
-                progress_requesting_copilot_review(),
-                progress_waiting_for_copilot_review(),
-                progress_applying_review_feedback(),
-            ],
-            vec![
-                "planning child #222".to_string(),
-                "implementing branch nightloop/221-222".to_string(),
-                "requesting copilot review".to_string(),
-                "waiting for copilot review".to_string(),
-                "applying review feedback".to_string(),
-            ]
-        );
+        let second = nightly_branch_publication(221, 223, "main", Some("nightloop/221-222"));
+        assert_eq!(second.pr_base, "nightloop/221-222");
+        assert!(second.push_before_pr);
     }
 }
