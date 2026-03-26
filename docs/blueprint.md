@@ -28,15 +28,6 @@ Supported commands:
 - `nightloop start`
 - `nightloop nightly`
 
-Not part of the product anymore:
-
-- `setup-labels`
-- `budget`
-- `record-run`
-- legacy aliases
-- Copilot review loop
-- staged split state/docs
-
 ## Contracts
 
 Child Issues must contain:
@@ -76,6 +67,7 @@ required_paths = ["README.md", "AGENTS.md"]
 - validates required target paths
 - validates required control prompt/template files
 - guarantees managed labels exist on GitHub
+- safely creates any missing managed labels
 
 `start`:
 
@@ -98,13 +90,6 @@ Retained hardening:
 - nightly branches are pushed before PR creation
 - later nightly PRs base on the previous successful child branch
 - safe stale local branch replacement is allowed when a managed branch name must be recreated
-
-Removed safety/repair layers:
-
-- Copilot request/poll/fix loops
-- split-state persistence and advancement
-- split docs
-- broad issue-label repair loops
 
 Oversize diffs always resolve to `split_required` for the current child only.
 

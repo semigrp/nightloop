@@ -1,12 +1,12 @@
 [github]
-owner = "UTAGEDA"
-repo = "canaria"
+owner = "example-org"
+repo = "nightloop-sandbox"
 base_branch = "main"
 
 [agent]
 command = "codex exec --full-auto"
 plan_command = "codex exec --full-auto"
-working_directory = "/Users/semigrp/dev/canaria"
+working_directory = "/absolute/path/to/nightloop-sandbox"
 default_model = "gpt-5.4"
 default_reasoning_effort = "medium"
 

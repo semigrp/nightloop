@@ -364,6 +364,8 @@ fn help_mentions_only_surviving_commands_and_removed_commands_fail() {
     assert!(help_stdout.contains("nightloop estimate PATH --basis template|local|hybrid"));
     assert!(help_stdout.contains("nightloop start PARENT_ISSUE"));
     assert!(help_stdout.contains("nightloop nightly PARENT_ISSUE --hours 2|3|4|5|6"));
+    assert!(help_stdout
+        .contains("check validates required paths and may create missing managed labels"));
     assert!(!help_stdout.contains("setup-labels"));
     assert!(!help_stdout.contains("record-run"));
     assert!(!help_stdout.contains("Compatibility aliases"));

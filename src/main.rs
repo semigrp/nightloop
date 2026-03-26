@@ -445,6 +445,7 @@ Usage:
 
 Notes:
   --config PATH overrides --target NAME.
+  check validates required paths and may create missing managed labels.
   --verbose streams executed commands and live subprocess output to stderr.
 "
     );
