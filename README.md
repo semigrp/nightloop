@@ -1,13 +1,14 @@
 # nightloop
 
 `nightloop` is a Codex-first minimal parent/child issue runner.
+Canonical requirements live in [docs/requirements.md](docs/requirements.md).
 
 It keeps one narrow model:
 
 - Parent Issue = ordered campaign container
-- Child Issue = executable work unit
-- `start` = run the first runnable child
-- `nightly` = run as many runnable children as fit in a 2–6 hour window
+- Child Issue = executable work unit and future contract
+- `start` = single-issue deep run policy
+- `nightly` = budgeted multi-run orchestration policy within a 2–6 hour window
 
 The CLI shells out to local tools instead of embedding provider-specific runtimes:
 
@@ -102,6 +103,8 @@ Optional sections:
 Below-minimum diffs are allowed only when `Scope` contains the exact line `docs-only` or `config-only`.
 
 ## Execution Rules
+
+`start` and `nightly` are run policies over the same parent/child issue ontology.
 
 Eligibility requires:
 

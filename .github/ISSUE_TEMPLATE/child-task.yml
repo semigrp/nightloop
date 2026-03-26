@@ -121,7 +121,6 @@ body:
         - template
         - local
         - hybrid
-        - ai
         - manual
     validations:
       required: true

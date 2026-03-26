@@ -1,5 +1,8 @@
 # nightloop blueprint
 
+This file is a compact product summary.
+Canonical requirements, ontology, lifecycle semantics, and authoritative-state rules live in [docs/requirements.md](requirements.md).
+
 ## Product
 
 `nightloop` is a Codex-first minimal parent/child issue runner.
@@ -7,15 +10,17 @@
 Fixed shape:
 
 - Parent Issue = campaign container with ordered child references
-- Child Issue = executable work unit
-- `start` = single-child execution path
-- `nightly` = ordered multi-child execution path inside a selected 2–6 hour window
+- Child Issue = executable work unit and future contract
+- `start` = single-child deep-run policy
+- `nightly` = ordered multi-child budget policy inside a selected 2–6 hour window
 
-The core stays provider-agnostic and shells out to:
+The core stays narrow and shells out to:
 
 - `gh`
 - `git`
 - configured planning and implementation commands
+
+`start` and `nightly` are run policies, not ontology terms.
 
 ## Public Surface
 
