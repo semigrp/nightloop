@@ -11,9 +11,12 @@ use crate::{
     estimate::{self, EstimateBasis},
     git_ops,
     github::GitHubClient,
+    intent_bundle::{self, IntentBundle},
     issue_lint, issue_parse,
     models::{ChildIssue, IssueEstimate, IssueSnapshot, ParentIssue, RunRecord},
-    reporting, selection, telemetry,
+    prompt_builder, reporting,
+    run_outcome::{RunOutcome, RunOutcomeKind},
+    selection, telemetry,
 };
 
 #[derive(Debug)]
@@ -42,6 +45,7 @@ impl RunReport {
 struct PreparedIssue {
     snapshot: IssueSnapshot,
     child: Option<ChildIssue>,
+    intent_bundle: Option<IntentBundle>,
     estimate: Option<IssueEstimate>,
     status: String,
     reasons: Vec<String>,
@@ -69,6 +73,36 @@ struct Publication {
     branch_name: String,
     pr_base: String,
     push_before_pr: bool,
+}
+
+#[derive(Debug)]
+struct ExecutionSuccess {
+    diff_stat: DiffStat,
+    pr_url: String,
+}
+
+#[derive(Debug)]
+struct StageFailure {
+    kind: RunOutcomeKind,
+    status: &'static str,
+    reason: String,
+    diff_stat: Option<DiffStat>,
+}
+
+impl StageFailure {
+    fn new(
+        kind: RunOutcomeKind,
+        status: &'static str,
+        reason: String,
+        diff_stat: Option<DiffStat>,
+    ) -> Self {
+        Self {
+            kind,
+            status,
+            reason,
+            diff_stat,
+        }
+    }
 }
 
 pub fn dry_run(config: &Config, parent_issue_number: u64, hours: u32) -> Result<RunReport> {
@@ -165,6 +199,7 @@ fn prepare_campaign(
         let mut prepared = PreparedIssue {
             snapshot: snapshot.clone(),
             child: None,
+            intent_bundle: None,
             estimate: None,
             status: "skipped".to_string(),
             reasons: Vec::new(),
@@ -193,6 +228,17 @@ fn prepare_campaign(
         let child = lint
             .child
             .ok_or_else(|| anyhow!("missing parsed child after lint success"))?;
+        let intent_bundle = match intent_bundle::build_intent_bundle(config, &child) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                prepared.child = Some(child);
+                prepared.reasons.push("intent_bundle_failed".to_string());
+                prepared.detail = Some(err.to_string());
+                issues.push(prepared);
+                continue;
+            }
+        };
+
         let basis = EstimateBasis::from_cli_str(&config.estimation.default_basis)
             .unwrap_or(EstimateBasis::Hybrid);
         let estimate = estimate::estimate_child_issue(config, &child, basis)?;
@@ -217,6 +263,7 @@ fn prepare_campaign(
             estimated_total_minutes += estimate.estimated_minutes;
             if single_child {
                 prepared.child = Some(child);
+                prepared.intent_bundle = Some(intent_bundle);
                 prepared.estimate = Some(estimate);
                 issues.push(prepared);
                 break;
@@ -226,6 +273,7 @@ fn prepare_campaign(
         }
 
         prepared.child = Some(child);
+        prepared.intent_bundle = Some(intent_bundle);
         prepared.estimate = Some(estimate);
         issues.push(prepared);
     }
@@ -259,16 +307,23 @@ fn run_selected_issues(
     let run_root = config.run_root().join(&run_id);
     fs::create_dir_all(&run_root)?;
 
+    let workflow = workflow_name(single_child);
     let mut previous_success_branch: Option<String> = None;
     let mut stop = false;
+
     for item in &mut prepared.issues {
         if item.status != "selected" || stop {
             continue;
         }
+
         let child = item
             .child
             .clone()
             .ok_or_else(|| anyhow!("selected child missing"))?;
+        let bundle = item
+            .intent_bundle
+            .clone()
+            .ok_or_else(|| anyhow!("selected intent bundle missing"))?;
         let estimate = item
             .estimate
             .clone()
@@ -280,6 +335,10 @@ fn run_selected_issues(
             serde_json::to_string_pretty(&item.snapshot)?,
         )?;
         fs::write(child_run_dir.join("issue.md"), &item.snapshot.body)?;
+        fs::write(
+            child_run_dir.join("intent-bundle.json"),
+            serde_json::to_string_pretty(&bundle)?,
+        )?;
 
         let publication = if single_child {
             Publication {
@@ -308,115 +367,36 @@ fn run_selected_issues(
             git_ops::rev_parse(&workdir, &config.github.base_branch)?
         };
 
-        let started_at = Instant::now();
-        let outcome = (|| -> Result<(DiffStat, u32, u32, String)> {
-            prepare_branch(&workdir, &publication.branch_name, &publication.pr_base)?;
-            github.remove_labels(
-                child.number,
-                &[
-                    &config.labels.ready,
-                    &config.labels.blocked,
-                    &config.labels.review,
-                ],
-            )?;
-            github.add_labels(child.number, &[&config.labels.running])?;
-            if single_child {
-                run_plan_phase(config, &child, &estimate, &prepared.parent, &child_run_dir)?;
-            }
-            run_implementation_phase(
-                config,
-                &child,
-                &estimate,
-                &prepared.parent,
-                &child_run_dir,
-                single_child,
-            )?;
-            run_verification(&workdir, &child, &child_run_dir)?;
-
-            let diff_stat = git_ops::diff_against(&workdir, &base_sha, &[config.run_root()])?;
-            enforce_diff_budget(&child, &diff_stat, config)?;
-            let files_touched = diff_stat.files_touched;
-            let actual_minutes = started_at.elapsed().as_secs().div_ceil(60) as u32;
-            let commit_message = format!("child #{}: {}", child.number, child.title);
-            git_ops::commit_all(&workdir, &commit_message)?;
-            if publication.push_before_pr {
-                git_ops::push_current_branch(&workdir, &publication.branch_name)?;
-            }
-            let pr_title = format!("[{}] {}", child.number, child.title);
-            let pr_body = build_pr_body(&prepared.parent, &child, &estimate, single_child);
-            let pr_url = github.create_draft_pr(
-                &publication.pr_base,
-                &publication.branch_name,
-                &pr_title,
-                &pr_body,
-            )?;
-            Ok((diff_stat, actual_minutes, files_touched, pr_url))
-        })();
-
-        match outcome {
-            Ok((diff_stat, actual_minutes, files_touched, pr_url)) => {
-                let changed_lines = diff_stat.changed_lines;
-                github.remove_labels(child.number, &[&config.labels.running])?;
-                github.add_labels(child.number, &[&config.labels.review])?;
-
-                item.status = "success".to_string();
-                item.pr_url = Some(pr_url.clone());
-                item.actual_minutes = Some(actual_minutes);
-                item.changed_lines = Some(changed_lines);
-                item.files_touched = Some(files_touched);
-                previous_success_branch = Some(publication.branch_name.clone());
-
-                let record = RunRecord {
-                    run_id: run_id.clone(),
-                    parent_issue: prepared.parent.number,
-                    issue_number: child.number,
-                    issue_title: child.title.clone(),
-                    model_profile: estimate.model_profile.clone(),
-                    model: estimate.model.clone(),
-                    reasoning_effort: estimate.reasoning_effort.clone(),
-                    target_size: child.target_size.clone(),
-                    docs_impact: child.docs_impact.clone(),
-                    estimated_minutes: estimate.estimated_minutes,
-                    actual_minutes,
-                    changed_lines,
-                    files_touched,
-                    success: true,
-                    status: "success".to_string(),
-                    workflow: if single_child {
-                        "start".to_string()
-                    } else {
-                        "nightly".to_string()
-                    },
-                    planner_used: single_child,
-                    copilot_review: None,
-                    review_comments_total: 0,
-                    review_comments_applied: 0,
-                    review_comments_ignored: 0,
-                    fix_rounds: 0,
-                    split_mode: None,
-                    stage_index: None,
-                    stage_total: None,
-                    stage_completed: false,
-                    active_pr_url: Some(pr_url),
-                    branch: publication.branch_name.clone(),
-                    pr_base: publication.pr_base.clone(),
-                    pr_url: item.pr_url.clone(),
-                    recorded_at: Utc::now(),
-                };
-                telemetry::append_run_record(&config.telemetry_history_path(), &record)?;
-            }
-            Err(err) => {
-                let _ = github.remove_labels(child.number, &[&config.labels.running]);
-                let _ = github.add_labels(child.number, &[&config.labels.blocked]);
-                item.status = if err.to_string() == "split_required" {
-                    "split_required".to_string()
-                } else {
-                    "blocked".to_string()
-                };
-                item.reasons = vec![err.to_string()];
-                item.detail = Some(err.to_string());
-                stop = config.loop_cfg.stop_on_failure || single_child;
-            }
+        let outcome = execute_child(
+            config,
+            github,
+            &publication,
+            &prepared.parent,
+            &bundle,
+            &estimate,
+            &child_run_dir,
+            workflow,
+            &base_sha,
+            single_child,
+        );
+        let success = outcome.kind.is_success();
+        finalize_run(
+            config,
+            github,
+            &run_id,
+            prepared.parent.number,
+            &child,
+            &estimate,
+            &publication,
+            workflow,
+            single_child,
+            item,
+            &outcome,
+        )?;
+        if success {
+            previous_success_branch = Some(publication.branch_name.clone());
+        } else if config.loop_cfg.stop_on_failure || single_child {
+            stop = true;
         }
     }
 
@@ -428,63 +408,255 @@ fn run_selected_issues(
     Ok(())
 }
 
+fn execute_child(
+    config: &Config,
+    github: &GitHubClient<'_>,
+    publication: &Publication,
+    parent: &ParentIssue,
+    bundle: &IntentBundle,
+    estimate: &IssueEstimate,
+    child_run_dir: &Path,
+    workflow: &str,
+    base_sha: &str,
+    planner_used: bool,
+) -> RunOutcome {
+    let started_at = Instant::now();
+    let result = execute_child_inner(
+        config,
+        github,
+        publication,
+        parent,
+        bundle,
+        estimate,
+        child_run_dir,
+        workflow,
+        base_sha,
+        planner_used,
+    );
+    let actual_minutes = started_at.elapsed().as_secs().div_ceil(60) as u32;
+
+    match result {
+        Ok(success) => RunOutcome::success(
+            actual_minutes,
+            success.diff_stat.changed_lines,
+            success.diff_stat.files_touched,
+            success.pr_url,
+        ),
+        Err(failure) => RunOutcome::terminal(
+            failure.kind,
+            failure.status,
+            failure.reason,
+            actual_minutes,
+            failure.diff_stat.map(|stat| stat.changed_lines),
+            failure.diff_stat.map(|stat| stat.files_touched),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_child_inner(
+    config: &Config,
+    github: &GitHubClient<'_>,
+    publication: &Publication,
+    parent: &ParentIssue,
+    bundle: &IntentBundle,
+    estimate: &IssueEstimate,
+    child_run_dir: &Path,
+    workflow: &str,
+    base_sha: &str,
+    planner_used: bool,
+) -> Result<ExecutionSuccess, StageFailure> {
+    let workdir = config.working_directory();
+    let child = &bundle.child;
+
+    prepare_branch(&workdir, &publication.branch_name, &publication.pr_base)
+        .map_err(|err| stage_failure_from_error(err.to_string(), None))?;
+    github
+        .remove_labels(
+            child.number,
+            &[
+                &config.labels.ready,
+                &config.labels.blocked,
+                &config.labels.review,
+            ],
+        )
+        .map_err(|err| stage_failure_from_error(err.to_string(), None))?;
+    github
+        .add_labels(child.number, &[&config.labels.running])
+        .map_err(|err| stage_failure_from_error(err.to_string(), None))?;
+
+    let plan_output = if planner_used {
+        Some(
+            run_plan_phase(config, bundle, estimate, parent, child_run_dir)
+                .map_err(|err| stage_failure_from_error(err.to_string(), None))?,
+        )
+    } else {
+        None
+    };
+
+    run_implementation_phase(
+        config,
+        bundle,
+        estimate,
+        parent,
+        child_run_dir,
+        workflow,
+        plan_output.as_deref(),
+    )
+    .map_err(|err| stage_failure_from_error(err.to_string(), None))?;
+    run_verification(&workdir, bundle, child_run_dir)
+        .map_err(|err| stage_failure_from_error(err.to_string(), None))?;
+
+    let diff_stat = git_ops::diff_against(&workdir, base_sha, &[config.run_root()])
+        .map_err(|err| stage_failure_from_error(err.to_string(), None))?;
+    if let Err(err) = enforce_diff_budget(child, &diff_stat, config) {
+        return Err(stage_failure_from_error(err.to_string(), Some(diff_stat)));
+    }
+
+    let commit_message = format!("child #{}: {}", child.number, child.title);
+    git_ops::commit_all(&workdir, &commit_message)
+        .map_err(|err| stage_failure_from_error(err.to_string(), Some(diff_stat)))?;
+    if publication.push_before_pr {
+        git_ops::push_current_branch(&workdir, &publication.branch_name)
+            .map_err(|err| stage_failure_from_error(err.to_string(), Some(diff_stat)))?;
+    }
+
+    let pr_title = format!("[{}] {}", child.number, child.title);
+    let pr_body = build_pr_body(parent, child, estimate, workflow);
+    let pr_url = github
+        .create_draft_pr(
+            &publication.pr_base,
+            &publication.branch_name,
+            &pr_title,
+            &pr_body,
+        )
+        .map_err(|err| stage_failure_from_error(err.to_string(), Some(diff_stat)))?;
+
+    Ok(ExecutionSuccess { diff_stat, pr_url })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_run(
+    config: &Config,
+    github: &GitHubClient<'_>,
+    run_id: &str,
+    parent_issue: u64,
+    child: &ChildIssue,
+    estimate: &IssueEstimate,
+    publication: &Publication,
+    workflow: &str,
+    planner_used: bool,
+    item: &mut PreparedIssue,
+    outcome: &RunOutcome,
+) -> Result<()> {
+    let _ = github.remove_labels(child.number, &[&config.labels.running]);
+    if outcome.kind.is_success() {
+        let _ = github.add_labels(child.number, &[&config.labels.review]);
+    } else {
+        let _ = github.add_labels(child.number, &[&config.labels.blocked]);
+    }
+
+    item.status = outcome.status.clone();
+    item.reasons = outcome.reason.clone().into_iter().collect();
+    item.detail = outcome.reason.clone();
+    item.pr_url = outcome.pr_url.clone();
+    item.actual_minutes = outcome.actual_minutes;
+    item.changed_lines = outcome.changed_lines;
+    item.files_touched = outcome.files_touched;
+
+    let record = RunRecord {
+        run_id: run_id.to_string(),
+        parent_issue,
+        issue_number: child.number,
+        issue_title: child.title.clone(),
+        model_profile: estimate.model_profile.clone(),
+        model: estimate.model.clone(),
+        reasoning_effort: estimate.reasoning_effort.clone(),
+        target_size: child.target_size.clone(),
+        docs_impact: child.docs_impact.clone(),
+        estimated_minutes: estimate.estimated_minutes,
+        actual_minutes: outcome.actual_minutes.unwrap_or_default(),
+        changed_lines: outcome.changed_lines.unwrap_or_default(),
+        files_touched: outcome.files_touched.unwrap_or_default(),
+        success: outcome.kind.is_success(),
+        status: outcome.status.clone(),
+        outcome: outcome.kind.clone(),
+        reason: outcome.reason.clone(),
+        workflow: workflow.to_string(),
+        planner_used,
+        copilot_review: None,
+        review_comments_total: 0,
+        review_comments_applied: 0,
+        review_comments_ignored: 0,
+        fix_rounds: 0,
+        split_mode: None,
+        stage_index: None,
+        stage_total: None,
+        stage_completed: false,
+        active_pr_url: outcome.pr_url.clone(),
+        branch: publication.branch_name.clone(),
+        pr_base: publication.pr_base.clone(),
+        pr_url: outcome.pr_url.clone(),
+        recorded_at: Utc::now(),
+    };
+    telemetry::append_run_record(&config.telemetry_history_path(), &record)?;
+    Ok(())
+}
+
 fn run_plan_phase(
     config: &Config,
-    child: &ChildIssue,
+    bundle: &IntentBundle,
     estimate: &IssueEstimate,
     parent: &ParentIssue,
     child_run_dir: &Path,
-) -> Result<()> {
-    let template_path = config.resolve_control_path(Path::new("prompts/plan_child_issue.md"));
-    let template = fs::read_to_string(&template_path)
-        .map_err(|_| anyhow!("failed to read {}", template_path.display()))?;
-    let prompt = format!(
-        "{template}\n\nParent: #{} {}\nChild: #{} {}\nSuggested profile: {}\nEstimated minutes: {}\n\nIssue body:\n{}\n",
-        parent.number,
-        parent.title,
-        child.number,
-        child.title,
-        estimate.model_profile,
-        estimate.estimated_minutes,
-        child.body
-    );
+) -> Result<String> {
+    let prompt = prompt_builder::build_plan_prompt(config, parent, bundle, estimate)?;
+    let prompt_path = child_run_dir.join("plan-prompt.md");
+    fs::write(&prompt_path, &prompt)?;
     let result = agent_exec::run_shell_command(
         &config.agent.plan_command,
         &config.working_directory(),
         &[(
             "NIGHTLOOP_PROMPT_FILE".to_string(),
-            child_run_dir.join("plan-prompt.md").display().to_string(),
+            prompt_path.display().to_string(),
         )],
         CommandRunOptions::streaming("agent").with_stdin(&prompt),
     )?;
-    fs::write(child_run_dir.join("plan-prompt.md"), &prompt)?;
     fs::write(child_run_dir.join("plan.stdout"), &result.stdout)?;
     fs::write(child_run_dir.join("plan.stderr"), &result.stderr)?;
     if !result.success() {
         bail!("plan_command_failed");
     }
-    Ok(())
+    Ok(result.stdout)
 }
 
 fn run_implementation_phase(
     config: &Config,
-    child: &ChildIssue,
+    bundle: &IntentBundle,
     estimate: &IssueEstimate,
     parent: &ParentIssue,
     child_run_dir: &Path,
-    single_child: bool,
+    workflow: &str,
+    plan_output: Option<&str>,
 ) -> Result<()> {
-    let prompt = build_agent_prompt(parent, child, estimate, single_child);
+    let prompt = prompt_builder::build_implementation_prompt(
+        parent,
+        bundle,
+        estimate,
+        workflow,
+        plan_output,
+    );
+    let prompt_path = child_run_dir.join("agent-prompt.md");
+    fs::write(&prompt_path, &prompt)?;
     let result = agent_exec::run_shell_command(
         &config.agent.command,
         &config.working_directory(),
         &[(
             "NIGHTLOOP_PROMPT_FILE".to_string(),
-            child_run_dir.join("agent-prompt.md").display().to_string(),
+            prompt_path.display().to_string(),
         )],
         CommandRunOptions::streaming("agent").with_stdin(&prompt),
     )?;
-    fs::write(child_run_dir.join("agent-prompt.md"), &prompt)?;
     fs::write(child_run_dir.join("agent.stdout"), &result.stdout)?;
     fs::write(child_run_dir.join("agent.stderr"), &result.stderr)?;
     if !result.success() {
@@ -493,9 +665,9 @@ fn run_implementation_phase(
     Ok(())
 }
 
-fn run_verification(workdir: &Path, child: &ChildIssue, child_run_dir: &Path) -> Result<()> {
+fn run_verification(workdir: &Path, bundle: &IntentBundle, child_run_dir: &Path) -> Result<()> {
     let mut transcripts = Vec::new();
-    for (index, command) in child.verification.iter().enumerate() {
+    for (index, command) in bundle.verification.iter().enumerate() {
         let result = agent_exec::run_shell_command(
             &command.command,
             workdir,
@@ -530,36 +702,37 @@ fn enforce_diff_budget(child: &ChildIssue, diff_stat: &DiffStat, config: &Config
     Ok(())
 }
 
-fn build_agent_prompt(
-    parent: &ParentIssue,
-    child: &ChildIssue,
-    estimate: &IssueEstimate,
-    single_child: bool,
-) -> String {
-    format!(
-        "Parent issue: #{} {}\nChild issue: #{} {}\nWorkflow: {}\nModel profile: {}\nEstimated minutes: {}\n\nImplement only the child issue scope. Run the declared verification commands before finishing.\n\nIssue body:\n{}\n",
-        parent.number,
-        parent.title,
-        child.number,
-        child.title,
-        if single_child { "start" } else { "nightly" },
-        estimate.model_profile,
-        estimate.estimated_minutes,
-        child.body
-    )
+fn stage_failure_from_error(reason: String, diff_stat: Option<DiffStat>) -> StageFailure {
+    match reason.as_str() {
+        "split_required" => StageFailure::new(
+            RunOutcomeKind::SplitRequired,
+            "split_required",
+            reason,
+            diff_stat,
+        ),
+        "diff_below_min" => {
+            StageFailure::new(RunOutcomeKind::Blocked, "blocked", reason, diff_stat)
+        }
+        _ => StageFailure::new(
+            RunOutcomeKind::RetryableFailure,
+            "blocked",
+            reason,
+            diff_stat,
+        ),
+    }
 }
 
 fn build_pr_body(
     parent: &ParentIssue,
     child: &ChildIssue,
     estimate: &IssueEstimate,
-    single_child: bool,
+    workflow: &str,
 ) -> String {
     format!(
         "## Summary\n- Parent issue: #{}\n- Child issue: #{}\n- Workflow: {}\n- Model profile: {}\n- Estimated minutes: {}\n",
         parent.number,
         child.number,
-        if single_child { "start" } else { "nightly" },
+        workflow,
         estimate.model_profile,
         estimate.estimated_minutes
     )
@@ -583,7 +756,7 @@ fn build_parent_summary(prepared: &PreparedCampaign, single_child: bool) -> Stri
 
     format!(
         "nightloop {} summary\n\n- succeeded: {}\n- deferred: {}\n",
-        if single_child { "start" } else { "nightly" },
+        workflow_name(single_child),
         if succeeded.is_empty() {
             "none".to_string()
         } else {
@@ -711,6 +884,14 @@ fn nightly_branch_publication(
         branch_name: format!("nightloop/{}-{}", parent_issue, child_issue),
         pr_base: previous_success_branch.unwrap_or(base_branch).to_string(),
         push_before_pr: true,
+    }
+}
+
+fn workflow_name(single_child: bool) -> &'static str {
+    if single_child {
+        "start"
+    } else {
+        "nightly"
     }
 }
 

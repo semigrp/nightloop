@@ -251,6 +251,93 @@ fn write_issue_snapshot(state_dir: &Path, number: u64, title: &str, body: &str, 
     .unwrap();
 }
 
+fn standard_child_body(verification_command: &str) -> String {
+    format!(
+        "## Background\none\n## Goal\ntwo\n## Scope\ndocs-only\n## Out of scope\nthree\n## Source of truth\nREADME.md\n## Acceptance criteria\nfour\n## Verification\ncmd: {verification_command}\n## Dependencies\nnone\n## Target change size\nXS\n## Documentation impact\nreadme\n## Suggested model profile\nbalanced\n## Estimated execution time\n30\n## Estimation basis\ntemplate\n## Estimation confidence\nmedium\n"
+    )
+}
+
+fn setup_start_fixture(
+    name: &str,
+    agent_command: &str,
+    child_body: &str,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let root = temp_root(name);
+    let control = root.join("control");
+    let repo = root.join("repo");
+    let bare = root.join("remote.git");
+    fs::create_dir_all(&control).unwrap();
+    init_git_repo(&repo);
+    assert!(Command::new("git")
+        .current_dir(&root)
+        .args(["init", "--bare", bare.display().to_string().as_str()])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(Command::new("git")
+        .current_dir(&repo)
+        .args([
+            "remote",
+            "add",
+            "origin",
+            bare.display().to_string().as_str()
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    commit_file(&repo, "README.md", "seed\n");
+    fs::write(repo.join("AGENTS.md"), "agents\n").unwrap();
+    assert!(Command::new("git")
+        .current_dir(&repo)
+        .args(["add", "AGENTS.md"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(Command::new("git")
+        .current_dir(&repo)
+        .args(["commit", "-m", "add agents"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    let config = write_config_for_target(&control, &repo, agent_command);
+    let bin = root.join("bin");
+    let state = root.join("gh-state");
+    write_mock_gh(&bin, &state);
+
+    let parent_body = "## Ordered child Issues\n- [ ] #222 first child\n";
+    write_issue_snapshot(&state, 221, "Parent", parent_body, &["campaign"]);
+    write_issue_snapshot(
+        &state,
+        222,
+        "Child",
+        child_body,
+        &["night-run", "agent:ready"],
+    );
+
+    (root, control, repo, config, bin)
+}
+
+fn latest_child_run_dir(repo: &Path, child_number: u64) -> PathBuf {
+    let run_root = repo.join(".nightloop/runs");
+    let run_dir = fs::read_dir(&run_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .next()
+        .unwrap();
+    run_dir.join(format!("child-{child_number}"))
+}
+
+fn last_history_record(repo: &Path) -> serde_json::Value {
+    let history = fs::read_to_string(repo.join(".nightloop/history.jsonl")).unwrap();
+    let line = history.lines().last().unwrap();
+    serde_json::from_str(line).unwrap()
+}
+
 #[test]
 fn check_lint_and_estimate_commands_work_end_to_end() {
     let root = temp_root("core");
@@ -386,63 +473,10 @@ fn help_mentions_only_surviving_commands_and_removed_commands_fail() {
 
 #[test]
 fn start_runs_single_child_and_creates_draft_pr() {
-    let root = temp_root("start");
-    let control = root.join("control");
-    let repo = root.join("repo");
-    let bare = root.join("remote.git");
-    fs::create_dir_all(&control).unwrap();
-    init_git_repo(&repo);
-    assert!(Command::new("git")
-        .current_dir(&root)
-        .args(["init", "--bare", bare.display().to_string().as_str()])
-        .output()
-        .unwrap()
-        .status
-        .success());
-    assert!(Command::new("git")
-        .current_dir(&repo)
-        .args([
-            "remote",
-            "add",
-            "origin",
-            bare.display().to_string().as_str()
-        ])
-        .output()
-        .unwrap()
-        .status
-        .success());
-    commit_file(&repo, "README.md", "seed\n");
-    fs::write(repo.join("AGENTS.md"), "agents\n").unwrap();
-    assert!(Command::new("git")
-        .current_dir(&repo)
-        .args(["add", "AGENTS.md"])
-        .output()
-        .unwrap()
-        .status
-        .success());
-    assert!(Command::new("git")
-        .current_dir(&repo)
-        .args(["commit", "-m", "add agents"])
-        .output()
-        .unwrap()
-        .status
-        .success());
-
-    let config =
-        write_config_for_target(&control, &repo, "printf '\\nagent change\\n' >> README.md");
-    let bin = root.join("bin");
-    let state = root.join("gh-state");
-    write_mock_gh(&bin, &state);
-
-    let parent_body = "## Ordered child Issues\n- [ ] #222 first child\n";
-    let child_body = "## Background\none\n## Goal\ntwo\n## Scope\ndocs-only\n## Out of scope\nthree\n## Source of truth\nREADME.md\n## Acceptance criteria\nfour\n## Verification\ncmd: git status --short\n## Dependencies\nnone\n## Target change size\nXS\n## Documentation impact\nreadme\n## Suggested model profile\nbalanced\n## Estimated execution time\n30\n## Estimation basis\ntemplate\n## Estimation confidence\nmedium\n";
-    write_issue_snapshot(&state, 221, "Parent", parent_body, &["campaign"]);
-    write_issue_snapshot(
-        &state,
-        222,
-        "Child",
-        child_body,
-        &["night-run", "agent:ready"],
+    let (_root, control, repo, config, bin) = setup_start_fixture(
+        "start",
+        "printf '\\nagent change\\n' >> README.md",
+        &standard_child_body("git status --short"),
     );
 
     let (code, stdout, stderr) = run_cli(
@@ -455,4 +489,90 @@ fn start_runs_single_child_and_creates_draft_pr() {
     assert!(stdout.contains("status=success"));
     assert!(stdout.contains("pr_url=https://example.test/pr/1"));
     assert!(repo.join(".nightloop/history.jsonl").exists());
+
+    let record = last_history_record(&repo);
+    assert_eq!(record["outcome"], "success");
+    assert_eq!(record["success"], true);
+    let child_run_dir = latest_child_run_dir(&repo, 222);
+    let bundle: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(child_run_dir.join("intent-bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["resolved_sources"][0]["source_ref"]["resolved_path"],
+        fs::canonicalize(repo.join("README.md"))
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    let agent_prompt = fs::read_to_string(child_run_dir.join("agent-prompt.md")).unwrap();
+    assert!(agent_prompt.contains("## Source of truth"));
+    assert!(agent_prompt.contains("seed"));
+}
+
+#[test]
+fn start_records_verification_failures_in_telemetry() {
+    let (_root, control, repo, config, bin) = setup_start_fixture(
+        "start-verify-fail",
+        "printf '\\nagent change\\n' >> README.md",
+        &standard_child_body("false"),
+    );
+
+    let (code, stdout, stderr) = run_cli(
+        &control,
+        &["--config", &config.display().to_string(), "start", "221"],
+        Some(&bin),
+    );
+    assert_ne!(code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("status=blocked"));
+    assert!(stdout.contains("reasons=verification_failed"));
+
+    let record = last_history_record(&repo);
+    assert_eq!(record["outcome"], "retryable_failure");
+    assert_eq!(record["reason"], "verification_failed");
+}
+
+#[test]
+fn start_records_agent_failures_in_telemetry() {
+    let (_root, control, repo, config, bin) = setup_start_fixture(
+        "start-agent-fail",
+        "false",
+        &standard_child_body("git status --short"),
+    );
+
+    let (code, stdout, stderr) = run_cli(
+        &control,
+        &["--config", &config.display().to_string(), "start", "221"],
+        Some(&bin),
+    );
+    assert_ne!(code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("status=blocked"));
+    assert!(stdout.contains("reasons=agent_command_failed"));
+
+    let record = last_history_record(&repo);
+    assert_eq!(record["outcome"], "retryable_failure");
+    assert_eq!(record["reason"], "agent_command_failed");
+}
+
+#[test]
+fn start_records_split_required_in_telemetry() {
+    let (_root, control, repo, config, bin) = setup_start_fixture(
+        "start-split-required",
+        "for i in $(seq 1 150); do printf 'line %s\\n' \"$i\" >> README.md; done",
+        &standard_child_body("git status --short"),
+    );
+
+    let (code, stdout, stderr) = run_cli(
+        &control,
+        &["--config", &config.display().to_string(), "start", "221"],
+        Some(&bin),
+    );
+    assert_ne!(code, 0, "stdout={stdout}\nstderr={stderr}");
+    assert!(stdout.contains("status=split_required"));
+    assert!(stdout.contains("reasons=split_required"));
+
+    let record = last_history_record(&repo);
+    assert_eq!(record["outcome"], "split_required");
+    assert_eq!(record["reason"], "split_required");
+    assert!(record["changed_lines"].as_u64().unwrap() > 120);
 }

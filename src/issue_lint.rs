@@ -196,7 +196,11 @@ pub fn lint_child_issue(config: &Config, snapshot: &IssueSnapshot) -> LintReport
                                 ));
                             }
                         }
-                        SourceRefKind::Url { .. } => {}
+                        SourceRefKind::Url { url } => findings.push(finding(
+                            "unsupported_source_ref",
+                            Some("source of truth".to_string()),
+                            format!("unsupported source-of-truth URL: {url}"),
+                        )),
                     }
                 }
             }
@@ -356,5 +360,26 @@ template_weight = 0.35
             .findings
             .iter()
             .any(|finding| finding.code == "verification_empty"));
+    }
+
+    #[test]
+    fn lint_rejects_url_source_of_truth_refs() {
+        let root = env::temp_dir().join(format!("nightloop-lint-url-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("target")).unwrap();
+        let issue_path = root.join("issue.md");
+        fs::write(
+            &issue_path,
+            "## Background\none\n## Goal\ntwo\n## Scope\ndocs-only\n## Out of scope\nthree\n## Source of truth\nhttps://example.com/spec.md\n## Acceptance criteria\nfour\n## Verification\ncmd: cargo test\n## Dependencies\nnone\n## Target change size\nXS\n## Documentation impact\nreadme\n## Suggested model profile\nbalanced\n## Estimated execution time\n30\n## Estimation basis\ntemplate\n## Estimation confidence\nmedium\n",
+        )
+        .unwrap();
+
+        let report = lint_markdown_issue(&test_config(&root), &issue_path).unwrap();
+        assert!(!report.valid);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unsupported_source_ref"));
     }
 }

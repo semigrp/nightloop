@@ -2,12 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::config::Config;
-
-const REQUIRED_CONTROL_FILES: &[(&str, &str)] = &[
-    ("prompt", "prompts/plan_child_issue.md"),
-    ("template", "docs/templates/plan.md"),
-];
+use crate::{config::Config, control_assets};
 
 #[derive(Debug)]
 pub struct MissingPath {
@@ -23,6 +18,7 @@ pub struct DocsReport {
 
 pub fn check_docs(config: &Config) -> Result<DocsReport> {
     let mut missing_paths = Vec::new();
+    let manifest = control_assets::manifest();
 
     for path in &config.docs.required_paths {
         let resolved = config.resolve_target_path(path);
@@ -34,11 +30,21 @@ pub fn check_docs(config: &Config) -> Result<DocsReport> {
         }
     }
 
-    for (kind, relative) in REQUIRED_CONTROL_FILES {
-        let path = config.resolve_control_path(&PathBuf::from(relative));
+    for spec in &manifest.runtime_required_paths {
+        let path = config.resolve_control_path(&spec.path);
         if !path.exists() {
             missing_paths.push(MissingPath {
-                kind: (*kind).to_string(),
+                kind: format!("runtime_{}", spec.kind),
+                path,
+            });
+        }
+    }
+
+    for spec in &manifest.authoring_required_paths {
+        let path = config.resolve_control_path(&spec.path);
+        if !path.exists() {
+            missing_paths.push(MissingPath {
+                kind: format!("authoring_{}", spec.kind),
                 path,
             });
         }
@@ -141,9 +147,8 @@ template_weight = 0.35
         let config = Config::load(&config_path).unwrap();
         let report = check_docs(&config).unwrap();
         assert!(!report.ok);
-        assert!(report
-            .missing_paths
-            .iter()
-            .any(|item| item.path.ends_with("prompts/plan_child_issue.md")));
+        assert!(report.missing_paths.iter().any(|item| {
+            item.kind == "runtime_prompt" && item.path.ends_with("prompts/plan_child_issue.md")
+        }));
     }
 }

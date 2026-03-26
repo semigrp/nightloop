@@ -70,9 +70,15 @@ required_paths = ["README.md", "AGENTS.md"]
 `check`:
 
 - validates required target paths
-- validates required control prompt/template files
+- validates runtime and authoring control assets from one shared manifest
 - guarantees managed labels exist on GitHub
 - safely creates any missing managed labels
+
+Current `Source of truth` support is local-only:
+
+- repo-relative paths
+- absolute local paths
+- remote URLs are rejected during lint
 
 `start`:
 

@@ -83,6 +83,7 @@ The following describe the current repo and workflow shape, but they are not cor
 - current `start` behavior runs a planning step before implementation, while current `nightly` behavior does not
 - current run artifacts and telemetry use configured paths such as `.nightloop/runs` and `.nightloop/history.jsonl`; those are defaults, not permanent path contracts
 - current child issue metadata allows `manual` as an issue-authored estimation basis, while the public `estimate --basis` CLI remains `template|local|hybrid`
+- current `Source of truth` resolution supports repo-local and absolute local files only; remote URLs are rejected during lint
 - exact PR bodies, parent summary comments, stdout pair formatting, and report field shapes are current reporting choices
 - current stop-on-failure behavior and any fixed review or fix-round heuristics are operating choices, not doctrine
 

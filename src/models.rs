@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::run_outcome::RunOutcomeKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IssueState {
@@ -310,6 +312,10 @@ pub struct RunRecord {
     pub files_touched: u32,
     pub success: bool,
     pub status: String,
+    #[serde(default = "default_outcome_kind")]
+    pub outcome: RunOutcomeKind,
+    #[serde(default)]
+    pub reason: Option<String>,
     #[serde(default = "default_workflow_kind")]
     pub workflow: String,
     #[serde(default)]
@@ -341,4 +347,8 @@ pub struct RunRecord {
 
 fn default_workflow_kind() -> String {
     "run".to_string()
+}
+
+fn default_outcome_kind() -> RunOutcomeKind {
+    RunOutcomeKind::Success
 }

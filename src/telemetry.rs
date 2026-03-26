@@ -103,6 +103,7 @@ mod tests {
     use chrono::Utc;
 
     use crate::models::{DocsImpact, RunRecord, SizeBand};
+    use crate::run_outcome::RunOutcomeKind;
 
     use super::{append_run_record, load_stats, read_run_record};
 
@@ -123,6 +124,8 @@ mod tests {
             files_touched: 3,
             success: true,
             status: "success".to_string(),
+            outcome: RunOutcomeKind::Success,
+            reason: None,
             workflow: "run".to_string(),
             planner_used: false,
             copilot_review: None,
@@ -153,6 +156,28 @@ mod tests {
         assert_eq!(parsed.issue_number, 11);
         let history_path = root.join("history.jsonl");
         append_run_record(&history_path, &parsed).unwrap();
+        let stats = load_stats(&history_path, "balanced", &SizeBand::M, &DocsImpact::None).unwrap();
+        assert_eq!(stats.samples, 1);
+        assert_eq!(stats.average_minutes, 90.0);
+    }
+
+    #[test]
+    fn load_stats_ignores_non_success_records() {
+        let root =
+            env::temp_dir().join(format!("nightloop-telemetry-failed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let history_path = root.join("history.jsonl");
+
+        let mut failed = record(120);
+        failed.success = false;
+        failed.status = "blocked".to_string();
+        failed.outcome = RunOutcomeKind::RetryableFailure;
+        failed.reason = Some("verification_failed".to_string());
+
+        append_run_record(&history_path, &record(90)).unwrap();
+        append_run_record(&history_path, &failed).unwrap();
+
         let stats = load_stats(&history_path, "balanced", &SizeBand::M, &DocsImpact::None).unwrap();
         assert_eq!(stats.samples, 1);
         assert_eq!(stats.average_minutes, 90.0);

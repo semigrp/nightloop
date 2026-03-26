@@ -47,6 +47,7 @@ nightloop nightly 221 --target canaria --hours 4 --dry-run
 ```
 
 `check` is the bootstrap command. It validates required target paths and guarantees the managed workflow labels exist on GitHub.
+It also validates runtime and authoring control assets from the shared manifest.
 If any managed labels are missing, `check` safely creates them.
 
 ## Config
@@ -99,6 +100,9 @@ Optional sections:
 
 - fenced `sh` / `bash` / `shell` blocks
 - `cmd:` lines
+
+`Source of truth` currently accepts only repo-relative or absolute local file paths.
+Remote URLs are lint failures.
 
 Below-minimum diffs are allowed only when `Scope` contains the exact line `docs-only` or `config-only`.
 
